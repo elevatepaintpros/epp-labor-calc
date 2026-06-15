@@ -465,7 +465,7 @@ function HistoryRow({ job, onDelete, onUpdate }) {
         <div>
           <div style={{ fontWeight: 600, fontSize: "14px", color: COLORS.offWhite }}>{job.clientName || "Unnamed Job"}</div>
           <div style={{ fontSize: "11px", color: COLORS.muted, marginTop: "2px" }}>
-            {PROJECT_LABELS[job.projectType]} · {job.package} · {job.dateCompleted || job.date}
+            {job.projectId ? `#${job.projectId} · ` : ""}{PROJECT_LABELS[job.projectType]} · {job.package} · {job.dateCompleted || job.date}
           </div>
         </div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.revenue)}</div>
