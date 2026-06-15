@@ -172,7 +172,7 @@ async function saveHistory(history) {
 // ─── CSV EXPORT / IMPORT ────────────────────────────────────────────────────
 
 const CSV_COLUMNS = [
-  "date", "clientName", "projectId", "projectType", "package",
+  "date", "dateCompleted", "clientName", "projectId", "projectType", "package",
   "salesperson", "pm", "revenue", "changeOrderRev",
   "laborBudget", "laborPct", "materialCost", "materialPct",
   "gpDollar", "gpPct", "totalDays", "totalManHours",
@@ -180,7 +180,7 @@ const CSV_COLUMNS = [
 ];
 
 const CSV_HEADERS = [
-  "Date", "Client", "Project ID", "Project Type", "Package",
+  "Date Saved", "Date Completed", "Client", "Project ID", "Project Type", "Package",
   "Salesperson", "PM", "Revenue", "Change Orders",
   "Labor Budget", "Labor %", "Material Cost", "Material %",
   "Est. GP $", "GP %", "Total Days", "Man Hours",
@@ -202,6 +202,7 @@ function jobToCsvRow(job) {
 
   return CSV_COLUMNS.map(col => {
     if (col === "crewSummary") return escCsv(crewStr);
+    if (col === "dateCompleted") return escCsv(job.dateCompleted || "");
     if (col === "laborPct" || col === "materialPct" || col === "gpPct")
       return escCsv(((job[col] || 0) * 100).toFixed(1));
     if (col === "revenue" || col === "changeOrderRev" || col === "laborBudget" || col === "materialCost" || col === "gpDollar")
@@ -251,7 +252,8 @@ function importCsvToJobs(text) {
 
   const colMap = {};
   const mapping = {
-    date: ["date"], clientname: ["client", "clientname", "client name"],
+    date: ["date", "date saved"], datecompleted: ["date completed", "datecompleted", "completed"],
+    clientname: ["client", "clientname", "client name"],
     projectid: ["project id", "projectid"], projecttype: ["project type", "projecttype"],
     package: ["package"], salesperson: ["salesperson"], pm: ["pm"],
     revenue: ["revenue"], changeorderrev: ["change orders", "changeorderrev", "change order rev"],
@@ -275,6 +277,7 @@ function importCsvToJobs(text) {
     jobs.push({
       id: Date.now() + i,
       date: get("date") || new Date().toLocaleDateString("en-US"),
+      dateCompleted: get("datecompleted") || "",
       clientName: get("clientname"),
       projectId: get("projectid"),
       projectType: get("projecttype") || "Res Int",
@@ -374,34 +377,95 @@ function CrewRow({ member, onChange, onRemove, laborBudget }) {
 
 // ─── HISTORY ROW ─────────────────────────────────────────────────────────────
 
-function HistoryRow({ job, onDelete }) {
+const editInputStyle = {
+  background: "rgba(255,255,255,0.08)",
+  border: "1px solid rgba(255,255,255,0.15)",
+  borderRadius: "5px",
+  color: "#F5F5F5",
+  padding: "5px 8px",
+  fontSize: "12px",
+  width: "100%",
+  fontFamily: "inherit",
+};
+
+const editLabelStyle = {
+  fontSize: "10px",
+  color: "#8a96a8",
+  textTransform: "uppercase",
+  letterSpacing: "0.05em",
+  marginBottom: "3px",
+};
+
+function HistoryRow({ job, onDelete, onUpdate }) {
   const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(null);
   const target = GP_TARGETS[job.projectType] || 0.5;
   const color = gpColor(job.gpPct, target);
+
+  function startEdit(e) {
+    e.stopPropagation();
+    setDraft({ ...job });
+    setEditing(true);
+    setExpanded(true);
+  }
+
+  function cancelEdit(e) {
+    e.stopPropagation();
+    setDraft(null);
+    setEditing(false);
+  }
+
+  function saveEdit(e) {
+    e.stopPropagation();
+    const rev = parseNum(draft.revenue);
+    const lab = parseNum(draft.laborBudget);
+    const mat = parseNum(draft.materialCost);
+    const updated = {
+      ...draft,
+      revenue: rev,
+      laborBudget: lab,
+      laborPct: rev > 0 ? lab / rev : 0,
+      materialCost: mat,
+      materialPct: rev > 0 ? mat / rev : 0,
+      gpDollar: rev - lab - mat,
+      gpPct: rev > 0 ? (rev - lab - mat) / rev : 0,
+      totalDays: parseNum(draft.totalDays),
+      totalManHours: parseNum(draft.totalManHours),
+      changeOrderRev: parseNum(draft.changeOrderRev),
+    };
+    onUpdate(updated);
+    setDraft(null);
+    setEditing(false);
+  }
+
+  function updateDraft(field, value) {
+    setDraft({ ...draft, [field]: value });
+  }
 
   return (
     <div style={{
       borderRadius: "10px",
-      border: `1px solid rgba(255,255,255,0.08)`,
+      border: `1px solid ${editing ? COLORS.gold + "44" : "rgba(255,255,255,0.08)"}`,
       marginBottom: "8px",
       overflow: "hidden",
     }}>
       <div
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => !editing && setExpanded(!expanded)}
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 90px 90px 90px 80px 28px",
+          gridTemplateColumns: "1fr 90px 90px 90px 80px 28px 28px",
           gap: "8px",
           alignItems: "center",
           padding: "12px 16px",
-          background: "rgba(255,255,255,0.03)",
-          cursor: "pointer",
+          background: editing ? "rgba(200,151,42,0.06)" : "rgba(255,255,255,0.03)",
+          cursor: editing ? "default" : "pointer",
         }}
       >
         <div>
           <div style={{ fontWeight: 600, fontSize: "14px", color: COLORS.offWhite }}>{job.clientName || "Unnamed Job"}</div>
           <div style={{ fontSize: "11px", color: COLORS.muted, marginTop: "2px" }}>
-            {PROJECT_LABELS[job.projectType]} · {job.package} · {job.date}
+            {PROJECT_LABELS[job.projectType]} · {job.package} · {job.dateCompleted || job.date}
           </div>
         </div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.revenue)}</div>
@@ -414,16 +478,23 @@ function HistoryRow({ job, onDelete }) {
           {fmtPct(job.gpPct)}
         </div>
         <button
+          onClick={startEdit}
+          title="Edit"
+          style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "13px" }}
+        >{editing ? "" : "✎"}</button>
+        <button
           onClick={e => { e.stopPropagation(); onDelete(job.id); }}
           style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "16px" }}
         >×</button>
       </div>
-      {expanded && (
+
+      {expanded && !editing && (
         <div style={{ padding: "12px 16px", background: "rgba(0,0,0,0.2)", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px", marginBottom: "12px" }}>
             {[
+              ["Date Completed", job.dateCompleted || "--"],
               ["Salesperson", job.salesperson], ["PM", job.pm],
-              ["Days", job.totalDays + " days"],
+              ["Days", (job.totalDays || 0) + " days"],
               ["Labor Budget", fmt$(job.laborBudget) + " (" + fmtPct(job.laborPct) + ")"],
               ["Material Est.", fmt$(job.materialCost) + " (" + fmtPct(job.materialPct) + ")"],
               ["GP Target", fmtPct(target)],
@@ -444,6 +515,81 @@ function HistoryRow({ job, onDelete }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {editing && draft && (
+        <div style={{ padding: "14px 16px", background: "rgba(0,0,0,0.25)", borderTop: `1px solid ${COLORS.gold}33` }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "10px", marginBottom: "12px" }}>
+            <div>
+              <div style={editLabelStyle}>Client Name</div>
+              <input style={editInputStyle} value={draft.clientName || ""} onChange={e => updateDraft("clientName", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Project ID</div>
+              <input style={editInputStyle} value={draft.projectId || ""} onChange={e => updateDraft("projectId", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Date Completed</div>
+              <input style={editInputStyle} type="date" value={draft.dateCompleted || ""} onChange={e => updateDraft("dateCompleted", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Project Type</div>
+              <select style={editInputStyle} value={draft.projectType} onChange={e => updateDraft("projectType", e.target.value)}>
+                {PROJECT_TYPES.map(t => <option key={t} value={t}>{PROJECT_LABELS[t]}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={editLabelStyle}>Package</div>
+              <select style={editInputStyle} value={draft.package} onChange={e => updateDraft("package", e.target.value)}>
+                {PACKAGES.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={editLabelStyle}>Salesperson</div>
+              <select style={editInputStyle} value={draft.salesperson} onChange={e => updateDraft("salesperson", e.target.value)}>
+                {SALESPERSON_LIST.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={editLabelStyle}>PM</div>
+              <select style={editInputStyle} value={draft.pm} onChange={e => updateDraft("pm", e.target.value)}>
+                {PM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={editLabelStyle}>Revenue ($)</div>
+              <input style={editInputStyle} type="number" value={draft.revenue} onChange={e => updateDraft("revenue", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Change Orders ($)</div>
+              <input style={editInputStyle} type="number" value={draft.changeOrderRev || 0} onChange={e => updateDraft("changeOrderRev", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Labor Budget ($)</div>
+              <input style={editInputStyle} type="number" value={draft.laborBudget} onChange={e => updateDraft("laborBudget", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Material Cost ($)</div>
+              <input style={editInputStyle} type="number" value={draft.materialCost} onChange={e => updateDraft("materialCost", e.target.value)} />
+            </div>
+            <div>
+              <div style={editLabelStyle}>Total Days</div>
+              <input style={editInputStyle} type="number" value={draft.totalDays || 0} onChange={e => updateDraft("totalDays", e.target.value)} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+            <button onClick={cancelEdit} style={{
+              fontSize: "11px", fontWeight: 600, color: COLORS.muted,
+              background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+              borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+            }}>Cancel</button>
+            <button onClick={saveEdit} style={{
+              fontSize: "11px", fontWeight: 600, color: COLORS.charcoal,
+              background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
+              border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+            }}>Save Changes</button>
+          </div>
         </div>
       )}
     </div>
@@ -500,6 +646,7 @@ export default function App() {
   const [materialPctOverride, setMaterialPctOverride] = useState("");
   const [crew, setCrew] = useState([{ id: 1, name: "", level: "Painter 2", days: 0 }]);
   const [materialItems, setMaterialItems] = useState([]);
+  const [dateCompleted, setDateCompleted] = useState(new Date().toISOString().slice(0, 10));
   const [laborDollarEdit, setLaborDollarEdit] = useState(null);
   const [matDollarEdit, setMatDollarEdit] = useState(null);
 
@@ -510,6 +657,8 @@ export default function App() {
   // History
   const [history, setHistory] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [filterFrom, setFilterFrom] = useState("");
+  const [filterTo, setFilterTo] = useState("");
 
   useEffect(() => {
     loadHistory().then(h => { setHistory(h); setHistoryLoaded(true); });
@@ -596,6 +745,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
     const job = {
       id: Date.now(),
       date: new Date().toLocaleDateString("en-US"),
+      dateCompleted,
       clientName, projectId, projectType, package: pkg,
       salesperson, pm, revenue: totalRev, changeOrderRev: co,
       laborBudget, laborPct, materialCost, materialPct: matPct,
@@ -611,6 +761,12 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
 
   async function handleDelete(id) {
     const updated = history.filter(j => j.id !== id);
+    setHistory(updated);
+    await saveHistory(updated);
+  }
+
+  async function handleUpdateJob(updatedJob) {
+    const updated = history.map(j => j.id === updatedJob.id ? updatedJob : j);
     setHistory(updated);
     await saveHistory(updated);
   }
@@ -742,6 +898,10 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   <select style={inputStyle} value={pm} onChange={e => setPm(e.target.value)}>
                     {PM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
                   </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Date Completed</label>
+                  <input style={inputStyle} type="date" value={dateCompleted} onChange={e => setDateCompleted(e.target.value)} />
                 </div>
               </div>
             </div>
@@ -1230,12 +1390,27 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
         )}
 
         {/* ── HISTORY TAB ── */}
-        {tab === "history" && (
+        {tab === "history" && (() => {
+          const filteredHistory = history.filter(j => {
+            const d = j.dateCompleted || j.date || "";
+            const dateVal = d.includes("-") ? d : (() => {
+              const p = new Date(d);
+              return isNaN(p.getTime()) ? "" : p.toISOString().slice(0, 10);
+            })();
+            if (filterFrom && dateVal < filterFrom) return false;
+            if (filterTo && dateVal > filterTo) return false;
+            return true;
+          });
+          const isFiltered = filterFrom || filterTo;
+
+          return (
           <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
               <div style={{ fontWeight: 700, fontSize: "15px" }}>Job History</div>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span style={{ fontSize: "12px", color: COLORS.muted }}>{history.length} jobs logged</span>
+                <span style={{ fontSize: "12px", color: COLORS.muted }}>
+                  {isFiltered ? `${filteredHistory.length} of ${history.length}` : history.length} jobs
+                </span>
                 <label style={{
                   fontSize: "11px", fontWeight: 600, color: COLORS.goldLight,
                   background: COLORS.gold + "22", border: `1px solid ${COLORS.gold}44`,
@@ -1246,7 +1421,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     style={{ display: "none" }} />
                 </label>
                 {history.length > 0 && (
-                  <button onClick={() => exportHistoryCsv(history)} style={{
+                  <button onClick={() => exportHistoryCsv(filteredHistory)} style={{
                     fontSize: "11px", fontWeight: 600, color: COLORS.goldLight,
                     background: COLORS.gold + "22", border: `1px solid ${COLORS.gold}44`,
                     borderRadius: "6px", padding: "4px 10px", cursor: "pointer",
@@ -1257,6 +1432,36 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               </div>
             </div>
 
+            {/* Date filter */}
+            {history.length > 0 && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: "10px",
+                marginBottom: "16px", flexWrap: "wrap",
+              }}>
+                <span style={{ fontSize: "11px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Filter:</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <input
+                    type="date" value={filterFrom}
+                    onChange={e => setFilterFrom(e.target.value)}
+                    style={{ ...editInputStyle, width: "140px", padding: "4px 8px" }}
+                  />
+                  <span style={{ fontSize: "11px", color: COLORS.muted }}>to</span>
+                  <input
+                    type="date" value={filterTo}
+                    onChange={e => setFilterTo(e.target.value)}
+                    style={{ ...editInputStyle, width: "140px", padding: "4px 8px" }}
+                  />
+                </div>
+                {isFiltered && (
+                  <button onClick={() => { setFilterFrom(""); setFilterTo(""); }} style={{
+                    fontSize: "11px", color: COLORS.muted, background: "rgba(255,255,255,0.06)",
+                    border: "1px solid rgba(255,255,255,0.12)", borderRadius: "6px",
+                    padding: "4px 10px", cursor: "pointer",
+                  }}>Clear</button>
+                )}
+              </div>
+            )}
+
             {history.length === 0 && (
               <div style={{
                 textAlign: "center", padding: "60px 20px",
@@ -1266,9 +1471,9 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               </div>
             )}
 
-            {/* Summary row if jobs exist */}
-            {history.length > 0 && (() => {
-              const withGP = history.filter(j => j.revenue > 0);
+            {/* Summary row - uses filtered data */}
+            {filteredHistory.length > 0 && (() => {
+              const withGP = filteredHistory.filter(j => j.revenue > 0);
               const totalRev = withGP.reduce((s, j) => s + j.revenue, 0);
               const totalGP = withGP.reduce((s, j) => s + j.gpDollar, 0);
               const avgGP = totalRev > 0 ? totalGP / totalRev : 0;
@@ -1297,20 +1502,27 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             {/* Column headers */}
             <div style={{
               display: "grid",
-              gridTemplateColumns: "1fr 90px 90px 90px 80px 28px",
+              gridTemplateColumns: "1fr 90px 90px 90px 80px 28px 28px",
               gap: "8px",
               padding: "0 16px 8px",
             }}>
-              {["Client", "Revenue", "Labor", "Est. GP", "GP %", ""].map(h => (
-                <div key={h} style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Client" ? "left" : "right" }}>{h}</div>
+              {["Client", "Revenue", "Labor", "Est. GP", "GP %", "", ""].map((h, i) => (
+                <div key={h + i} style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Client" ? "left" : "right" }}>{h}</div>
               ))}
             </div>
 
-            {history.map(job => (
-              <HistoryRow key={job.id} job={job} onDelete={handleDelete} />
+            {filteredHistory.length === 0 && history.length > 0 && (
+              <div style={{ textAlign: "center", padding: "40px 20px", color: COLORS.muted, fontSize: "13px" }}>
+                No jobs match the selected date range.
+              </div>
+            )}
+
+            {filteredHistory.map(job => (
+              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} />
             ))}
           </>
-        )}
+          );
+        })()}
       </div>
     </div>
   );
