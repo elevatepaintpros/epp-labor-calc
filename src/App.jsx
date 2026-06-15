@@ -657,6 +657,7 @@ export default function App() {
   // History
   const [history, setHistory] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
 
@@ -778,9 +779,16 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
     reader.onload = async (ev) => {
       const jobs = importCsvToJobs(ev.target.result);
       if (jobs.length === 0) return;
-      const updated = [...jobs, ...history];
+      const existingIds = new Set(history.map(j => j.projectId).filter(Boolean));
+      const fresh = jobs.filter(j => !j.projectId || !existingIds.has(j.projectId));
+      const skipped = jobs.length - fresh.length;
+      if (fresh.length === 0) return;
+      const updated = [...fresh, ...history];
       setHistory(updated);
       await saveHistory(updated);
+      if (skipped > 0) setImportMsg(`Imported ${fresh.length} jobs, skipped ${skipped} duplicates`);
+      else setImportMsg(`Imported ${fresh.length} jobs`);
+      setTimeout(() => setImportMsg(""), 4000);
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -1431,6 +1439,14 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 )}
               </div>
             </div>
+
+            {importMsg && (
+              <div style={{
+                fontSize: "12px", color: COLORS.green, background: COLORS.green + "18",
+                border: `1px solid ${COLORS.green}33`, borderRadius: "8px",
+                padding: "8px 14px", marginBottom: "12px",
+              }}>{importMsg}</div>
+            )}
 
             {/* Date filter */}
             {history.length > 0 && (
