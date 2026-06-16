@@ -175,7 +175,7 @@ const CSV_COLUMNS = [
   "date", "dateCompleted", "clientName", "projectId", "projectType", "package",
   "salesperson", "pm", "revenue", "changeOrderRev",
   "laborBudget", "laborPct", "materialCost", "materialPct",
-  "gpDollar", "gpPct", "totalDays", "totalManHours",
+  "gpDollar", "gpPct", "crewSize", "totalDays", "manDays", "totalManHours",
   "crewSummary",
 ];
 
@@ -183,7 +183,7 @@ const CSV_HEADERS = [
   "Date Saved", "Date Completed", "Client", "Project ID", "Project Type", "Package",
   "Salesperson", "PM", "Revenue", "Change Orders",
   "Labor Budget", "Labor %", "Material Cost", "Material %",
-  "Est. GP $", "GP %", "Total Days", "Man Hours",
+  "Est. GP $", "GP %", "# Guys", "Total Days", "Man-Days", "Man Hours",
   "Crew",
 ];
 
@@ -260,7 +260,9 @@ function importCsvToJobs(text) {
     laborbudget: ["labor budget", "laborbudget"], laborpct: ["labor %", "laborpct", "labor pct"],
     materialcost: ["material cost", "materialcost"], materialpct: ["material %", "materialpct", "material pct"],
     gpdollar: ["est. gp $", "gpdollar", "gp $", "gp dollar"], gppct: ["gp %", "gppct", "gp pct"],
-    totaldays: ["total days", "totaldays"], totalmanhours: ["man hours", "totalmanhours", "total man hours"],
+    crewsize: ["# guys", "crewsize", "crew size", "num guys"],
+    totaldays: ["total days", "totaldays"], mandays: ["man-days", "mandays", "man days"],
+    totalmanhours: ["man hours", "totalmanhours", "total man hours"],
   };
 
   for (const [field, aliases] of Object.entries(mapping)) {
@@ -292,7 +294,9 @@ function importCsvToJobs(text) {
       materialPct: num("materialpct") / 100,
       gpDollar: num("gpdollar"),
       gpPct: num("gppct") / 100,
+      crewSize: num("crewsize") || 0,
       totalDays: num("totaldays"),
+      manDays: num("mandays") || 0,
       totalManHours: num("totalmanhours"),
       crew: [],
     });
@@ -405,7 +409,13 @@ function HistoryRow({ job, onDelete, onUpdate }) {
 
   function startEdit(e) {
     e.stopPropagation();
-    setDraft({ ...job });
+    setDraft({
+      ...job,
+      salesperson: job.salesperson || SALESPERSON_LIST[0],
+      pm: job.pm || PM_LIST[0],
+      projectType: job.projectType || PROJECT_TYPES[0],
+      package: job.package || PACKAGES[0],
+    });
     setEditing(true);
     setExpanded(true);
   }
@@ -421,6 +431,9 @@ function HistoryRow({ job, onDelete, onUpdate }) {
     const rev = parseNum(draft.revenue);
     const lab = parseNum(draft.laborBudget);
     const mat = parseNum(draft.materialCost);
+    const days = parseNum(draft.totalDays);
+    const guys = parseNum(draft.crewSize) || 0;
+    const md = guys * days;
     const updated = {
       ...draft,
       revenue: rev,
@@ -430,8 +443,10 @@ function HistoryRow({ job, onDelete, onUpdate }) {
       materialPct: rev > 0 ? mat / rev : 0,
       gpDollar: rev - lab - mat,
       gpPct: rev > 0 ? (rev - lab - mat) / rev : 0,
-      totalDays: parseNum(draft.totalDays),
-      totalManHours: parseNum(draft.totalManHours),
+      crewSize: guys,
+      totalDays: days,
+      manDays: md,
+      totalManHours: md * 8,
       changeOrderRev: parseNum(draft.changeOrderRev),
     };
     onUpdate(updated);
@@ -494,7 +509,9 @@ function HistoryRow({ job, onDelete, onUpdate }) {
             {[
               ["Date Completed", job.dateCompleted || "--"],
               ["Salesperson", job.salesperson], ["PM", job.pm],
+              ["# Guys", job.crewSize || "--"],
               ["Days", (job.totalDays || 0) + " days"],
+              ["Man-Days", (job.manDays || 0) + " man-days"],
               ["Labor Budget", fmt$(job.laborBudget) + " (" + fmtPct(job.laborPct) + ")"],
               ["Material Est.", fmt$(job.materialCost) + " (" + fmtPct(job.materialPct) + ")"],
               ["GP Target", fmtPct(target)],
@@ -574,6 +591,10 @@ function HistoryRow({ job, onDelete, onUpdate }) {
               <input style={editInputStyle} type="number" value={draft.materialCost} onChange={e => updateDraft("materialCost", e.target.value)} />
             </div>
             <div>
+              <div style={editLabelStyle}># Guys</div>
+              <input style={editInputStyle} type="number" value={draft.crewSize || 0} onChange={e => updateDraft("crewSize", e.target.value)} />
+            </div>
+            <div>
               <div style={editLabelStyle}>Total Days</div>
               <input style={editInputStyle} type="number" value={draft.totalDays || 0} onChange={e => updateDraft("totalDays", e.target.value)} />
             </div>
@@ -645,6 +666,7 @@ export default function App() {
   const [targetLaborPct, setTargetLaborPct] = useState(35);
   const [materialPctOverride, setMaterialPctOverride] = useState("");
   const [crew, setCrew] = useState([{ id: 1, name: "", level: "Painter 2", days: 0 }]);
+  const [crewSize, setCrewSize] = useState("");
   const [materialItems, setMaterialItems] = useState([]);
   const [dateCompleted, setDateCompleted] = useState(new Date().toISOString().slice(0, 10));
   const [laborDollarEdit, setLaborDollarEdit] = useState(null);
@@ -715,8 +737,9 @@ export default function App() {
   }, 0);
 
   const totalDays = crew.reduce((s, m) => s + (m.days || 0), 0);
-  const totalManDays = crew.length > 0 && totalDays > 0 ? totalDays : 0;
-  const totalManHours = totalManDays * 8;
+  const numGuys = parseNum(crewSize) || crew.filter(m => m.name).length || 0;
+  const manDays = numGuys * totalDays;
+  const totalManHours = manDays * 8;
 
   // ─── SLACK TABLE ──────────────────────────────────────────────────────────
 
@@ -724,7 +747,7 @@ export default function App() {
 Project: ${clientName || "TBD"} | ${PROJECT_LABELS[projectType]} | ${pkg}
 Revenue: ${fmt$(totalRev)} | Target Labor: ${targetLaborPct}%
 
-Days: ${totalDays} | Labor Budget: ${fmt$(laborBudget)}
+Crew: ${numGuys} guys | Days: ${totalDays} | Man-Days: ${manDays} | Labor Budget: ${fmt$(laborBudget)}
 
 *Crew Assignments:*
 ${enrichedCrew.filter(m => m.name).map(m => {
@@ -750,7 +773,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
       clientName, projectId, projectType, package: pkg,
       salesperson, pm, revenue: totalRev, changeOrderRev: co,
       laborBudget, laborPct, materialCost, materialPct: matPct,
-      gpDollar, gpPct, totalDays, totalManHours,
+      gpDollar, gpPct, totalDays, crewSize: numGuys, manDays, totalManHours,
       crew: enrichedCrew.filter(m => m.name),
     };
     const updated = [job, ...history];
@@ -1271,8 +1294,19 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             <div style={cardStyle}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
                 <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase" }}>Crew & Piece Rate</div>
-                <div style={{ fontSize: "11px", color: COLORS.muted }}>
-                  {totalDays} days · {totalManHours} man-hrs
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                    <label style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.04em" }}># Guys</label>
+                    <input
+                      style={{ ...inputStyle, width: "50px", padding: "4px 8px", fontSize: "12px", textAlign: "center" }}
+                      type="number" min="0" value={crewSize}
+                      onChange={e => setCrewSize(e.target.value)}
+                      placeholder={String(crew.filter(m => m.name).length || 0)}
+                    />
+                  </div>
+                  <div style={{ fontSize: "11px", color: COLORS.muted }}>
+                    {totalDays} days · {manDays} man-days · {totalManHours} man-hrs
+                  </div>
                 </div>
               </div>
 
