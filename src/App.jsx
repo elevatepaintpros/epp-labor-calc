@@ -400,7 +400,7 @@ const editLabelStyle = {
   marginBottom: "3px",
 };
 
-function HistoryRow({ job, onDelete, onUpdate }) {
+function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -415,6 +415,7 @@ function HistoryRow({ job, onDelete, onUpdate }) {
       pm: job.pm || PM_LIST[0],
       projectType: job.projectType || PROJECT_TYPES[0],
       package: job.package || PACKAGES[0],
+      paintItems: (job.paintItems || []).map((pi, i) => ({ ...pi, id: pi.id || Date.now() + i })),
     });
     setEditing(true);
     setExpanded(true);
@@ -448,6 +449,11 @@ function HistoryRow({ job, onDelete, onUpdate }) {
       manDays: md,
       totalManHours: md * 8,
       changeOrderRev: parseNum(draft.changeOrderRev),
+      paintItems: (draft.paintItems || []).filter(pi => pi.productId).map(pi => ({
+        productId: pi.productId,
+        qtyPurchased: pi.qtyPurchased || 0,
+        qtyUsed: pi.qtyUsed || 0,
+      })),
     };
     onUpdate(updated);
     setDraft(null);
@@ -532,6 +538,23 @@ function HistoryRow({ job, onDelete, onUpdate }) {
               ))}
             </div>
           )}
+          {job.paintItems && job.paintItems.length > 0 && (
+            <div style={{ marginTop: "12px" }}>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>Paint Usage</div>
+              {job.paintItems.map((pi, i) => {
+                const over = (pi.qtyPurchased || 0) - (pi.qtyUsed || 0);
+                return (
+                  <div key={i} style={{ fontSize: "12px", color: COLORS.offWhite, marginBottom: "3px" }}>
+                    {pi.productId} · {pi.qtyPurchased || 0} bought · {pi.qtyUsed || 0} used
+                    {pi.qtyUsed > 0 && <span style={{
+                      fontWeight: 600, marginLeft: "6px",
+                      color: over > 0 ? COLORS.gold : over < 0 ? COLORS.red : "#4ade80",
+                    }}>({over > 0 ? "+" : ""}{over} {over > 0 ? "over" : over < 0 ? "short" : "exact"})</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -599,6 +622,44 @@ function HistoryRow({ job, onDelete, onUpdate }) {
               <input style={editInputStyle} type="number" value={draft.totalDays || 0} onChange={e => updateDraft("totalDays", e.target.value)} />
             </div>
           </div>
+
+          {/* Paint Items */}
+          <div style={{ marginBottom: "12px" }}>
+            <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>Paint Usage</div>
+            {(draft.paintItems || []).map((pi, idx) => (
+              <div key={pi.id || idx} style={{
+                display: "grid", gridTemplateColumns: "1fr 70px 70px 28px",
+                gap: "6px", alignItems: "center", marginBottom: "6px",
+              }}>
+                <select style={editInputStyle} value={pi.productId || ""} onChange={e => {
+                  const items = draft.paintItems.map((p, i) => i === idx ? { ...p, productId: e.target.value } : p);
+                  updateDraft("paintItems", items);
+                }}>
+                  <option value="">Select paint</option>
+                  {paintCatalog.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Bought"
+                  value={pi.qtyPurchased || ""} onChange={e => {
+                    const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyPurchased: parseFloat(e.target.value) || 0 } : p);
+                    updateDraft("paintItems", items);
+                  }} />
+                <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Used"
+                  value={pi.qtyUsed || ""} onChange={e => {
+                    const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyUsed: parseFloat(e.target.value) || 0 } : p);
+                    updateDraft("paintItems", items);
+                  }} />
+                <button onClick={() => updateDraft("paintItems", draft.paintItems.filter((_, i) => i !== idx))}
+                  style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}>x</button>
+              </div>
+            ))}
+            <button onClick={() => updateDraft("paintItems", [...(draft.paintItems || []), { id: Date.now(), productId: "", qtyPurchased: 0, qtyUsed: 0 }])}
+              style={{
+                background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.15)",
+                borderRadius: "6px", color: COLORS.muted, padding: "6px", width: "100%",
+                cursor: "pointer", fontSize: "11px",
+              }}>+ Add paint item</button>
+          </div>
+
           <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
             <button onClick={cancelEdit} style={{
               fontSize: "11px", fontWeight: 600, color: COLORS.muted,
@@ -733,8 +794,12 @@ export default function App() {
 
   const paintItemsTotal = materialItems.reduce((sum, item) => {
     const product = paintCatalog.find(p => p.id === item.productId);
-    return sum + (product ? product.price * (item.qty || 0) : 0);
+    return sum + (product ? product.price * (item.qtyPurchased || item.qty || 0) : 0);
   }, 0);
+
+  const totalGalPurchased = materialItems.reduce((s, i) => s + (i.qtyPurchased || i.qty || 0), 0);
+  const totalGalUsed = materialItems.reduce((s, i) => s + (i.qtyUsed || 0), 0);
+  const totalGalOver = totalGalPurchased - totalGalUsed;
 
   const totalDays = crew.reduce((s, m) => s + (m.days || 0), 0);
   const numGuys = parseNum(crewSize) || crew.filter(m => m.name).length || 0;
@@ -775,6 +840,11 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
       laborBudget, laborPct, materialCost, materialPct: matPct,
       gpDollar, gpPct, totalDays, crewSize: numGuys, manDays, totalManHours,
       crew: enrichedCrew.filter(m => m.name),
+      paintItems: materialItems.filter(i => i.productId).map(i => ({
+        productId: i.productId,
+        qtyPurchased: i.qtyPurchased || i.qty || 0,
+        qtyUsed: i.qtyUsed || 0,
+      })),
     };
     const updated = [job, ...history];
     setHistory(updated);
@@ -1120,24 +1190,27 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               {materialItems.length > 0 && (
                 <div style={{
                   display: "grid",
-                  gridTemplateColumns: "1fr 70px 80px 80px 28px",
-                  gap: "8px",
+                  gridTemplateColumns: "1fr 65px 65px 55px 70px 80px 28px",
+                  gap: "6px",
                   padding: "0 12px 8px",
                 }}>
-                  {["Product", "Qty", "Unit $", "Line $", ""].map(h => (
-                    <div key={h} style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Product" ? "left" : "right" }}>{h}</div>
+                  {["Product", "Bought", "Used", "+/-", "Unit $", "Line $", ""].map(h => (
+                    <div key={h} style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Product" ? "left" : "center" }}>{h}</div>
                   ))}
                 </div>
               )}
 
               {materialItems.map(item => {
                 const product = paintCatalog.find(p => p.id === item.productId);
-                const lineTotal = product ? product.price * (item.qty || 0) : 0;
+                const bought = item.qtyPurchased || item.qty || 0;
+                const used = item.qtyUsed || 0;
+                const overUnder = bought - used;
+                const lineTotal = product ? product.price * bought : 0;
                 return (
                   <div key={item.id} style={{
                     display: "grid",
-                    gridTemplateColumns: "1fr 70px 80px 80px 28px",
-                    gap: "8px",
+                    gridTemplateColumns: "1fr 65px 65px 55px 70px 80px 28px",
+                    gap: "6px",
                     alignItems: "center",
                     padding: "10px 12px",
                     background: "rgba(255,255,255,0.04)",
@@ -1161,14 +1234,31 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                       type="number"
                       min="0"
                       step="1"
-                      placeholder="Qty"
-                      value={item.qty || ""}
+                      placeholder="0"
+                      value={item.qtyPurchased || item.qty || ""}
                       onChange={e => setMaterialItems(materialItems.map(i =>
-                        i.id === item.id ? { ...i, qty: parseFloat(e.target.value) || 0 } : i
+                        i.id === item.id ? { ...i, qtyPurchased: parseFloat(e.target.value) || 0 } : i
                       ))}
-                      style={{ ...inputStyle, textAlign: "center" }}
+                      style={{ ...inputStyle, textAlign: "center", padding: "8px 4px" }}
                     />
-                    <div style={{ textAlign: "right", fontSize: "12px", color: COLORS.muted }}>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="0"
+                      value={item.qtyUsed || ""}
+                      onChange={e => setMaterialItems(materialItems.map(i =>
+                        i.id === item.id ? { ...i, qtyUsed: parseFloat(e.target.value) || 0 } : i
+                      ))}
+                      style={{ ...inputStyle, textAlign: "center", padding: "8px 4px" }}
+                    />
+                    <div style={{
+                      textAlign: "center", fontSize: "12px", fontWeight: 600,
+                      color: used === 0 ? COLORS.muted : overUnder > 0 ? COLORS.gold : overUnder < 0 ? COLORS.red : "#4ade80",
+                    }}>
+                      {used === 0 ? "--" : (overUnder > 0 ? "+" : "") + overUnder}
+                    </div>
+                    <div style={{ textAlign: "center", fontSize: "12px", color: COLORS.muted }}>
                       {product ? fmt$(product.price) + "/" + product.unit : "--"}
                     </div>
                     <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.goldLight, fontWeight: 600 }}>
@@ -1189,7 +1279,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               })}
 
               <button
-                onClick={() => setMaterialItems([...materialItems, { id: Date.now(), productId: getRecommendedPaint(pkgPaintMap, pkg, projectType) || "", qty: 0 }])}
+                onClick={() => setMaterialItems([...materialItems, { id: Date.now(), productId: getRecommendedPaint(pkgPaintMap, pkg, projectType) || "", qtyPurchased: 0, qtyUsed: 0 }])}
                 style={{
                   background: "rgba(255,255,255,0.04)",
                   border: "1px dashed rgba(255,255,255,0.15)",
@@ -1228,6 +1318,30 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     color: paintItemsTotal > materialCost ? COLORS.red : COLORS.goldLight,
                   }}>
                     {fmt$(paintItemsTotal)} <span style={{ fontSize: "11px", fontWeight: 400, color: COLORS.muted }}>/ {fmt$(materialCost)} budget</span>
+                  </span>
+                </div>
+              )}
+
+              {totalGalPurchased > 0 && (
+                <div style={{
+                  marginTop: "8px",
+                  padding: "10px 14px",
+                  background: "rgba(255,255,255,0.03)",
+                  borderRadius: "8px",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}>
+                  <span style={{ fontSize: "12px", color: COLORS.muted }}>
+                    Gallon tracking
+                  </span>
+                  <span style={{ fontSize: "12px", color: COLORS.offWhite }}>
+                    {totalGalPurchased} bought
+                    {totalGalUsed > 0 && <> · {totalGalUsed} used · <span style={{
+                      fontWeight: 700,
+                      color: totalGalOver > 0 ? COLORS.gold : totalGalOver < 0 ? COLORS.red : "#4ade80",
+                    }}>{totalGalOver > 0 ? "+" : ""}{totalGalOver} {totalGalOver > 0 ? "over" : totalGalOver < 0 ? "short" : "exact"}</span></>}
                   </span>
                 </div>
               )}
@@ -1568,7 +1682,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             )}
 
             {filteredHistory.map(job => (
-              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} />
+              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={paintCatalog} />
             ))}
           </>
           );
