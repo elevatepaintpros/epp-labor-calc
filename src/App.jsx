@@ -27,11 +27,12 @@ const GP_TARGETS = {
   "Com Int": 0.30, "Com Ext": 0.30,
 };
 
-const PACKAGES = ["Standard", "Gold", "Platinum"];
-const MAT_PCT = { Standard: 0.15, Gold: 0.15, Platinum: 0.18 };
+const PACKAGES = ["Standard", "Gold", "Platinum", "N/A"];
+const MAT_PCT = { Standard: 0.15, Gold: 0.15, Platinum: 0.18, "N/A": 0.15 };
 
 const SALESPERSON_LIST = ["Greg", "Doug"];
 const PM_LIST = ["Z", "Greg"];
+const TEAM_LEAD_LIST = ["Abel Favela", "Zach Howick", "Danny DaVito", "Steve Tollardo", "Justin Edwards", "N/A"];
 const TEAM_MEMBERS = [
   "Abel Favela", "Zach Howick", "Danny DaVito", "Steve Tollardo",
   "Justin Edwards", "Rony (Brothers Esteban)", "Jose (Western Pro Painting)",
@@ -173,7 +174,7 @@ async function saveHistory(history) {
 
 const CSV_COLUMNS = [
   "date", "dateCompleted", "clientName", "projectId", "projectType", "package",
-  "salesperson", "pm", "revenue", "changeOrderRev",
+  "salesperson", "pm", "teamLead", "revenue", "changeOrderRev",
   "laborBudget", "laborPct", "materialCost", "materialPct",
   "gpDollar", "gpPct", "crewSize", "totalDays", "manDays", "totalManHours",
   "crewSummary",
@@ -181,7 +182,7 @@ const CSV_COLUMNS = [
 
 const CSV_HEADERS = [
   "Date Saved", "Date Completed", "Client", "Project ID", "Project Type", "Package",
-  "Salesperson", "PM", "Revenue", "Change Orders",
+  "Salesperson", "PM", "Team Lead", "Revenue", "Change Orders",
   "Labor Budget", "Labor %", "Material Cost", "Material %",
   "Est. GP $", "GP %", "# Guys", "Total Days", "Man-Days", "Man Hours",
   "Crew",
@@ -256,6 +257,7 @@ function importCsvToJobs(text) {
     clientname: ["client", "clientname", "client name"],
     projectid: ["project id", "projectid"], projecttype: ["project type", "projecttype"],
     package: ["package"], salesperson: ["salesperson"], pm: ["pm"],
+    teamlead: ["team lead", "teamlead", "lead"],
     revenue: ["revenue"], changeorderrev: ["change orders", "changeorderrev", "change order rev"],
     laborbudget: ["labor budget", "laborbudget"], laborpct: ["labor %", "laborpct", "labor pct"],
     materialcost: ["material cost", "materialcost"], materialpct: ["material %", "materialpct", "material pct"],
@@ -286,6 +288,7 @@ function importCsvToJobs(text) {
       package: get("package") || "Standard",
       salesperson: get("salesperson"),
       pm: get("pm"),
+      teamLead: get("teamlead"),
       revenue: num("revenue"),
       changeOrderRev: num("changeorderrev"),
       laborBudget: num("laborbudget"),
@@ -413,6 +416,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
       ...job,
       salesperson: job.salesperson || SALESPERSON_LIST[0],
       pm: job.pm || PM_LIST[0],
+      teamLead: job.teamLead || TEAM_LEAD_LIST[0],
       projectType: job.projectType || PROJECT_TYPES[0],
       package: job.package || PACKAGES[0],
       paintItems: (job.paintItems || []).map((pi, i) => ({ ...pi, id: pi.id || Date.now() + i })),
@@ -514,7 +518,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px", marginBottom: "12px" }}>
             {[
               ["Date Completed", job.dateCompleted || "--"],
-              ["Salesperson", job.salesperson], ["PM", job.pm],
+              ["Salesperson", job.salesperson], ["PM", job.pm], ["Team Lead", job.teamLead],
               ["# Guys", job.crewSize || "--"],
               ["Days", (job.totalDays || 0) + " days"],
               ["Man-Days", (job.manDays || 0) + " man-days"],
@@ -595,6 +599,12 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
               <div style={editLabelStyle}>PM</div>
               <select style={editInputStyle} value={draft.pm} onChange={e => updateDraft("pm", e.target.value)}>
                 {PM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={editLabelStyle}>Team Lead</div>
+              <select style={editInputStyle} value={draft.teamLead || ""} onChange={e => updateDraft("teamLead", e.target.value)}>
+                {TEAM_LEAD_LIST.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
             <div>
@@ -722,6 +732,7 @@ export default function App() {
   const [pkg, setPkg] = useState("Gold");
   const [salesperson, setSalesperson] = useState("Greg");
   const [pm, setPm] = useState("Z");
+  const [teamLead, setTeamLead] = useState(TEAM_LEAD_LIST[0]);
   const [revenue, setRevenue] = useState("");
   const [changeOrder, setChangeOrder] = useState("");
   const [targetLaborPct, setTargetLaborPct] = useState(35);
@@ -836,7 +847,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
       date: new Date().toLocaleDateString("en-US"),
       dateCompleted,
       clientName, projectId, projectType, package: pkg,
-      salesperson, pm, revenue: totalRev, changeOrderRev: co,
+      salesperson, pm, teamLead, revenue: totalRev, changeOrderRev: co,
       laborBudget, laborPct, materialCost, materialPct: matPct,
       gpDollar, gpPct, totalDays, crewSize: numGuys, manDays, totalManHours,
       crew: enrichedCrew.filter(m => m.name),
@@ -998,6 +1009,12 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   <label style={labelStyle}>Project Manager</label>
                   <select style={inputStyle} value={pm} onChange={e => setPm(e.target.value)}>
                     {PM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Team Lead</label>
+                  <select style={inputStyle} value={teamLead} onChange={e => setTeamLead(e.target.value)}>
+                    {TEAM_LEAD_LIST.map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </div>
                 <div>
