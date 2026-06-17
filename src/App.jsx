@@ -451,6 +451,8 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
   function saveEdit(e) {
     e.stopPropagation();
     const rev = parseNum(draft.revenue);
+    const co = parseNum(draft.changeOrderRev);
+    const totalRev = rev + co;
     const lab = parseNum(draft.laborBudget);
     const mat = parseNum(draft.materialCost);
     const days = parseNum(draft.totalDays);
@@ -458,13 +460,13 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
     const md = guys * days;
     const updated = {
       ...draft,
-      revenue: rev,
+      revenue: totalRev,
       laborBudget: lab,
-      laborPct: rev > 0 ? lab / rev : 0,
+      laborPct: totalRev > 0 ? lab / totalRev : 0,
       materialCost: mat,
-      materialPct: rev > 0 ? mat / rev : 0,
-      gpDollar: rev - lab - mat,
-      gpPct: rev > 0 ? (rev - lab - mat) / rev : 0,
+      materialPct: totalRev > 0 ? mat / totalRev : 0,
+      gpDollar: totalRev - lab - mat,
+      gpPct: totalRev > 0 ? (totalRev - lab - mat) / totalRev : 0,
       crewSize: guys,
       totalDays: days,
       manDays: md,
@@ -1033,14 +1035,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   </select>
                 </div>
                 <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "5px" }}>
-                    <label style={{ ...labelStyle, marginBottom: 0 }}>Team Lead</label>
-                    <button
-                      onClick={() => setEditingLeads(!editingLeads)}
-                      style={{ background: "none", border: "none", color: editingLeads ? COLORS.gold : COLORS.muted, cursor: "pointer", fontSize: "11px", padding: 0 }}
-                      title="Edit team leads"
-                    >&#9998;</button>
-                  </div>
+                  <label style={labelStyle}>Team Lead</label>
                   <select style={inputStyle} value={teamLead} onChange={e => setTeamLead(e.target.value)}>
                     {teamLeadList.map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
@@ -1051,67 +1046,6 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 </div>
               </div>
             </div>
-
-            {editingLeads && (
-              <div style={{
-                ...cardStyle,
-                border: `1px solid ${COLORS.gold}33`,
-                background: "rgba(200,151,42,0.04)",
-              }}>
-                <div style={{ fontWeight: 700, fontSize: "12px", color: COLORS.gold, marginBottom: "12px", letterSpacing: "0.05em", textTransform: "uppercase" }}>Manage Team Leads</div>
-                {teamLeadList.filter(l => l !== "N/A").map(lead => (
-                  <div key={lead} style={{
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                    padding: "6px 10px", marginBottom: "4px",
-                    background: "rgba(255,255,255,0.04)", borderRadius: "6px",
-                    border: "1px solid rgba(255,255,255,0.07)",
-                  }}>
-                    <span style={{ fontSize: "13px", color: COLORS.offWhite }}>{lead}</span>
-                    <button
-                      onClick={() => {
-                        const updated = teamLeadList.filter(l => l !== lead);
-                        setTeamLeadList(updated);
-                        saveTeamLeads(updated);
-                        if (teamLead === lead) setTeamLead(updated[0] || "N/A");
-                      }}
-                      style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}
-                      onMouseEnter={e => e.target.style.color = COLORS.red}
-                      onMouseLeave={e => e.target.style.color = COLORS.muted}
-                    >x</button>
-                  </div>
-                ))}
-                <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
-                  <input
-                    style={{ ...inputStyle, flex: 1, fontSize: "12px" }}
-                    placeholder="New team lead name"
-                    value={newLeadName}
-                    onChange={e => setNewLeadName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === "Enter" && newLeadName.trim()) {
-                        const updated = [...teamLeadList.filter(l => l !== "N/A"), newLeadName.trim(), "N/A"];
-                        setTeamLeadList(updated);
-                        saveTeamLeads(updated);
-                        setNewLeadName("");
-                      }
-                    }}
-                  />
-                  <button
-                    onClick={() => {
-                      if (!newLeadName.trim()) return;
-                      const updated = [...teamLeadList.filter(l => l !== "N/A"), newLeadName.trim(), "N/A"];
-                      setTeamLeadList(updated);
-                      saveTeamLeads(updated);
-                      setNewLeadName("");
-                    }}
-                    style={{
-                      fontSize: "11px", fontWeight: 600, color: COLORS.charcoal,
-                      background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
-                      border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
-                    }}
-                  >Add</button>
-                </div>
-              </div>
-            )}
 
             {/* Revenue */}
             <div style={cardStyle}>
@@ -1513,7 +1447,20 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             {/* Crew */}
             <div style={cardStyle}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-                <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase" }}>Crew & Piece Rate</div>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase" }}>Crew & Piece Rate</div>
+                  <button
+                    onClick={() => setEditingLeads(!editingLeads)}
+                    style={{
+                      fontSize: "10px", fontWeight: 600, letterSpacing: "0.04em",
+                      color: editingLeads ? COLORS.charcoal : COLORS.muted,
+                      background: editingLeads ? `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})` : "rgba(255,255,255,0.06)",
+                      border: `1px solid ${editingLeads ? "transparent" : "rgba(255,255,255,0.12)"}`,
+                      borderRadius: "5px", padding: "4px 10px", cursor: "pointer",
+                      textTransform: "uppercase",
+                    }}
+                  >{editingLeads ? "Done" : "Manage Team"}</button>
+                </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
                     <label style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.04em" }}># Guys</label>
@@ -1529,6 +1476,69 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   </div>
                 </div>
               </div>
+
+              {editingLeads && (
+                <div style={{
+                  padding: "14px",
+                  marginBottom: "16px",
+                  background: "rgba(200,151,42,0.04)",
+                  borderRadius: "8px",
+                  border: `1px solid ${COLORS.gold}33`,
+                }}>
+                  <div style={{ fontSize: "11px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "10px" }}>Team Leads</div>
+                  {teamLeadList.filter(l => l !== "N/A").map(lead => (
+                    <div key={lead} style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "5px 10px", marginBottom: "3px",
+                      background: "rgba(255,255,255,0.04)", borderRadius: "6px",
+                      border: "1px solid rgba(255,255,255,0.07)",
+                    }}>
+                      <span style={{ fontSize: "12px", color: COLORS.offWhite }}>{lead}</span>
+                      <button
+                        onClick={() => {
+                          const updated = teamLeadList.filter(l => l !== lead);
+                          setTeamLeadList(updated);
+                          saveTeamLeads(updated);
+                          if (teamLead === lead) setTeamLead(updated[0] || "N/A");
+                        }}
+                        style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}
+                        onMouseEnter={e => e.target.style.color = COLORS.red}
+                        onMouseLeave={e => e.target.style.color = COLORS.muted}
+                      >x</button>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                    <input
+                      style={{ ...inputStyle, flex: 1, fontSize: "12px" }}
+                      placeholder="New team lead name"
+                      value={newLeadName}
+                      onChange={e => setNewLeadName(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter" && newLeadName.trim()) {
+                          const updated = [...teamLeadList.filter(l => l !== "N/A"), newLeadName.trim(), "N/A"];
+                          setTeamLeadList(updated);
+                          saveTeamLeads(updated);
+                          setNewLeadName("");
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        if (!newLeadName.trim()) return;
+                        const updated = [...teamLeadList.filter(l => l !== "N/A"), newLeadName.trim(), "N/A"];
+                        setTeamLeadList(updated);
+                        saveTeamLeads(updated);
+                        setNewLeadName("");
+                      }}
+                      style={{
+                        fontSize: "11px", fontWeight: 600, color: COLORS.charcoal,
+                        background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
+                        border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+                      }}
+                    >Add</button>
+                  </div>
+                </div>
+              )}
 
               {/* Column headers */}
               <div style={{
