@@ -32,7 +32,11 @@ const MAT_PCT = { Standard: 0.15, Gold: 0.15, Platinum: 0.18, "N/A": 0.15 };
 
 const SALESPERSON_LIST = ["Greg", "Doug"];
 const PM_LIST = ["Z", "Greg"];
-const TEAM_LEAD_LIST = ["Abel Favela", "Zach Howick", "Danny DaVito", "Steve Tollardo", "Justin Edwards", "N/A"];
+const DEFAULT_TEAM_LEADS = [
+  "Abel Favela", "Zach Howick", "David Hernandez (Precision Drywall)",
+  "Fernando Blancarte (Blancarte Painting)", "Ricky Aguilar (Saias Painting)",
+  "Jose Ojeda (Western Pro Painting)", "Sergio Barba (SBAV Contractor Painting)", "N/A",
+];
 const TEAM_MEMBERS = [
   "Abel Favela", "Zach Howick", "Danny DaVito", "Steve Tollardo",
   "Justin Edwards", "Rony (Brothers Esteban)", "Jose (Western Pro Painting)",
@@ -167,7 +171,20 @@ async function loadHistory() {
 async function saveHistory(history) {
   try {
     await window.storage.set("epp_job_history", JSON.stringify(history));
-  } catch (e) { console.error(e); }
+  } catch (e) { /* ignore */ }
+}
+
+async function loadTeamLeads() {
+  try {
+    const r = await window.storage.get("epp_team_leads");
+    return r ? JSON.parse(r.value) : DEFAULT_TEAM_LEADS;
+  } catch { return DEFAULT_TEAM_LEADS; }
+}
+
+async function saveTeamLeads(leads) {
+  try {
+    await window.storage.set("epp_team_leads", JSON.stringify(leads));
+  } catch { /* ignore */ }
 }
 
 // ─── CSV EXPORT / IMPORT ────────────────────────────────────────────────────
@@ -403,7 +420,7 @@ const editLabelStyle = {
   marginBottom: "3px",
 };
 
-function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
+function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -416,7 +433,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
       ...job,
       salesperson: job.salesperson || SALESPERSON_LIST[0],
       pm: job.pm || PM_LIST[0],
-      teamLead: job.teamLead || TEAM_LEAD_LIST[0],
+      teamLead: job.teamLead || teamLeadList[0],
       projectType: job.projectType || PROJECT_TYPES[0],
       package: job.package || PACKAGES[0],
       paintItems: (job.paintItems || []).map((pi, i) => ({ ...pi, id: pi.id || Date.now() + i })),
@@ -604,7 +621,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog }) {
             <div>
               <div style={editLabelStyle}>Team Lead</div>
               <select style={editInputStyle} value={draft.teamLead || ""} onChange={e => updateDraft("teamLead", e.target.value)}>
-                {TEAM_LEAD_LIST.map(l => <option key={l} value={l}>{l}</option>)}
+                {teamLeadList.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
             <div>
@@ -732,7 +749,10 @@ export default function App() {
   const [pkg, setPkg] = useState("Gold");
   const [salesperson, setSalesperson] = useState("Greg");
   const [pm, setPm] = useState("Z");
-  const [teamLead, setTeamLead] = useState(TEAM_LEAD_LIST[0]);
+  const [teamLead, setTeamLead] = useState(DEFAULT_TEAM_LEADS[0]);
+  const [teamLeadList, setTeamLeadList] = useState(DEFAULT_TEAM_LEADS);
+  const [editingLeads, setEditingLeads] = useState(false);
+  const [newLeadName, setNewLeadName] = useState("");
   const [revenue, setRevenue] = useState("");
   const [changeOrder, setChangeOrder] = useState("");
   const [targetLaborPct, setTargetLaborPct] = useState(35);
@@ -757,6 +777,7 @@ export default function App() {
 
   useEffect(() => {
     loadHistory().then(h => { setHistory(h); setHistoryLoaded(true); });
+    loadTeamLeads().then(leads => { setTeamLeadList(leads); setTeamLead(leads[0]); });
     loadPaintPrices().then(({ catalog, pkgMap }) => {
       if (catalog.length > 0) setPaintCatalog(catalog);
       if (Object.keys(pkgMap).length > 0) setPkgPaintMap(pkgMap);
@@ -1012,9 +1033,16 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   </select>
                 </div>
                 <div>
-                  <label style={labelStyle}>Team Lead</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "5px" }}>
+                    <label style={{ ...labelStyle, marginBottom: 0 }}>Team Lead</label>
+                    <button
+                      onClick={() => setEditingLeads(!editingLeads)}
+                      style={{ background: "none", border: "none", color: editingLeads ? COLORS.gold : COLORS.muted, cursor: "pointer", fontSize: "11px", padding: 0 }}
+                      title="Edit team leads"
+                    >&#9998;</button>
+                  </div>
                   <select style={inputStyle} value={teamLead} onChange={e => setTeamLead(e.target.value)}>
-                    {TEAM_LEAD_LIST.map(l => <option key={l} value={l}>{l}</option>)}
+                    {teamLeadList.map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </div>
                 <div>
@@ -1023,6 +1051,67 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 </div>
               </div>
             </div>
+
+            {editingLeads && (
+              <div style={{
+                ...cardStyle,
+                border: `1px solid ${COLORS.gold}33`,
+                background: "rgba(200,151,42,0.04)",
+              }}>
+                <div style={{ fontWeight: 700, fontSize: "12px", color: COLORS.gold, marginBottom: "12px", letterSpacing: "0.05em", textTransform: "uppercase" }}>Manage Team Leads</div>
+                {teamLeadList.filter(l => l !== "N/A").map(lead => (
+                  <div key={lead} style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "6px 10px", marginBottom: "4px",
+                    background: "rgba(255,255,255,0.04)", borderRadius: "6px",
+                    border: "1px solid rgba(255,255,255,0.07)",
+                  }}>
+                    <span style={{ fontSize: "13px", color: COLORS.offWhite }}>{lead}</span>
+                    <button
+                      onClick={() => {
+                        const updated = teamLeadList.filter(l => l !== lead);
+                        setTeamLeadList(updated);
+                        saveTeamLeads(updated);
+                        if (teamLead === lead) setTeamLead(updated[0] || "N/A");
+                      }}
+                      style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}
+                      onMouseEnter={e => e.target.style.color = COLORS.red}
+                      onMouseLeave={e => e.target.style.color = COLORS.muted}
+                    >x</button>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1, fontSize: "12px" }}
+                    placeholder="New team lead name"
+                    value={newLeadName}
+                    onChange={e => setNewLeadName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && newLeadName.trim()) {
+                        const updated = [...teamLeadList.filter(l => l !== "N/A"), newLeadName.trim(), "N/A"];
+                        setTeamLeadList(updated);
+                        saveTeamLeads(updated);
+                        setNewLeadName("");
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (!newLeadName.trim()) return;
+                      const updated = [...teamLeadList.filter(l => l !== "N/A"), newLeadName.trim(), "N/A"];
+                      setTeamLeadList(updated);
+                      saveTeamLeads(updated);
+                      setNewLeadName("");
+                    }}
+                    style={{
+                      fontSize: "11px", fontWeight: 600, color: COLORS.charcoal,
+                      background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
+                      border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+                    }}
+                  >Add</button>
+                </div>
+              </div>
+            )}
 
             {/* Revenue */}
             <div style={cardStyle}>
@@ -1699,7 +1788,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             )}
 
             {filteredHistory.map(job => (
-              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={paintCatalog} />
+              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={paintCatalog} teamLeadList={teamLeadList} />
             ))}
           </>
           );
