@@ -187,6 +187,68 @@ async function saveTeamLeads(leads) {
   } catch { /* ignore */ }
 }
 
+async function loadCrewCapacity() {
+  try {
+    const r = await window.storage.get("epp_crew_capacity");
+    return r ? JSON.parse(r.value) : {};
+  } catch { return {}; }
+}
+
+async function saveCrewCapacity(data) {
+  try {
+    await window.storage.set("epp_crew_capacity", JSON.stringify(data));
+  } catch { /* ignore */ }
+}
+
+async function loadCustomPaints() {
+  try {
+    const r = await window.storage.get("epp_custom_paints");
+    return r ? JSON.parse(r.value) : [];
+  } catch { return []; }
+}
+
+async function saveCustomPaints(paints) {
+  try {
+    await window.storage.set("epp_custom_paints", JSON.stringify(paints));
+  } catch { /* ignore */ }
+}
+
+const CAPACITY_STATUSES = ["available", "on-job", "unavailable"];
+const CAPACITY_LABELS = { available: "Available", "on-job": "On Job", unavailable: "Unavailable" };
+const CAPACITY_COLORS = { available: "#22c55e", "on-job": "#C8972A", unavailable: "#6b7280" };
+
+function getWeekDates(weekOffset) {
+  const now = new Date();
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7) + weekOffset * 7);
+  monday.setHours(0, 0, 0, 0);
+  const days = [];
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+function getWeekLabel(weekOffset) {
+  if (weekOffset === 0) return "This Week";
+  if (weekOffset === 1) return "Next Week";
+  if (weekOffset === -1) return "Last Week";
+  if (weekOffset === -2) return "2 Weeks Ago";
+  return `Week ${weekOffset > 0 ? "+" : ""}${weekOffset}`;
+}
+
+function getDayLabel(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  return ["Mon", "Tue", "Wed", "Thu", "Fri"][d.getDay() === 0 ? 6 : d.getDay() - 1] || "";
+}
+
+function getDateLabel(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
 // ─── CSV EXPORT / IMPORT ────────────────────────────────────────────────────
 
 const CSV_COLUMNS = [
@@ -460,7 +522,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
     const md = guys * days;
     const updated = {
       ...draft,
-      revenue: totalRev,
+      revenue: rev,
       laborBudget: lab,
       laborPct: totalRev > 0 ? lab / totalRev : 0,
       materialCost: mat,
@@ -471,7 +533,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
       totalDays: days,
       manDays: md,
       totalManHours: md * 8,
-      changeOrderRev: parseNum(draft.changeOrderRev),
+      changeOrderRev: co,
       paintItems: (draft.paintItems || []).filter(pi => pi.productId).map(pi => ({
         productId: pi.productId,
         qtyPurchased: pi.qtyPurchased || 0,
@@ -512,7 +574,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
             {job.projectId ? `#${job.projectId} · ` : ""}{PROJECT_LABELS[job.projectType]} · {job.package} · {job.dateCompleted || job.date}
           </div>
         </div>
-        <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.revenue)}</div>
+        <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.revenue + (job.changeOrderRev || 0))}</div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.laborBudget)}</div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.gpDollar)}</div>
         <div style={{
@@ -566,9 +628,10 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
               <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>Paint Usage</div>
               {job.paintItems.map((pi, i) => {
                 const over = (pi.qtyPurchased || 0) - (pi.qtyUsed || 0);
+                const pName = pi.productId === "__other__" ? (pi.customName || "Other") : (paintCatalog.find(p => p.id === pi.productId)?.name || pi.productId);
                 return (
                   <div key={i} style={{ fontSize: "12px", color: COLORS.offWhite, marginBottom: "3px" }}>
-                    {pi.productId} · {pi.qtyPurchased || 0} bought · {pi.qtyUsed || 0} used
+                    {pName} · {pi.qtyPurchased || 0} bought · {pi.qtyUsed || 0} used
                     {pi.qtyUsed > 0 && <span style={{
                       fontWeight: 600, marginLeft: "6px",
                       color: over > 0 ? COLORS.gold : over < 0 ? COLORS.red : "#4ade80",
@@ -770,6 +833,13 @@ export default function App() {
   const [paintCatalog, setPaintCatalog] = useState(FALLBACK_CATALOG);
   const [pkgPaintMap, setPkgPaintMap] = useState(FALLBACK_PKG_MAP);
 
+  // Custom paints catalog
+  const [customPaints, setCustomPaints] = useState([]);
+
+  // Crew capacity
+  const [crewCapacity, setCrewCapacity] = useState({});
+  const [capacityWeekOffset, setCapacityWeekOffset] = useState(-2);
+
   // History
   const [history, setHistory] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -784,6 +854,8 @@ export default function App() {
       if (catalog.length > 0) setPaintCatalog(catalog);
       if (Object.keys(pkgMap).length > 0) setPkgPaintMap(pkgMap);
     });
+    loadCrewCapacity().then(setCrewCapacity);
+    loadCustomPaints().then(setCustomPaints);
   }, []);
 
   // ─── CALCULATIONS ──────────────────────────────────────────────────────────
@@ -826,8 +898,13 @@ export default function App() {
     return sum + m.multiplierShare * laborBudget;
   }, 0);
 
+  const fullPaintCatalog = [...paintCatalog, ...customPaints];
+
   const paintItemsTotal = materialItems.reduce((sum, item) => {
-    const product = paintCatalog.find(p => p.id === item.productId);
+    if (item.productId === "__other__") {
+      return sum + ((item.customPrice || 0) * (item.qtyPurchased || item.qty || 0));
+    }
+    const product = fullPaintCatalog.find(p => p.id === item.productId);
     return sum + (product ? product.price * (item.qtyPurchased || item.qty || 0) : 0);
   }, 0);
 
@@ -870,7 +947,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
       date: new Date().toLocaleDateString("en-US"),
       dateCompleted,
       clientName, projectId, projectType, package: pkg,
-      salesperson, pm, teamLead, revenue: totalRev, changeOrderRev: co,
+      salesperson, pm, teamLead, revenue: rev, changeOrderRev: co,
       laborBudget, laborPct, materialCost, materialPct: matPct,
       gpDollar, gpPct, totalDays, crewSize: numGuys, manDays, totalManHours,
       crew: enrichedCrew.filter(m => m.name),
@@ -878,6 +955,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
         productId: i.productId,
         qtyPurchased: i.qtyPurchased || i.qty || 0,
         qtyUsed: i.qtyUsed || 0,
+        ...(i.productId === "__other__" ? { customName: i.customName || "", customPrice: i.customPrice || 0 } : {}),
       })),
     };
     const updated = [job, ...history];
@@ -969,7 +1047,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
           </div>
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
-          {["calc", "history"].map(t => (
+          {["calc", "crew", "history"].map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -987,7 +1065,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 transition: "all 0.15s",
               }}
             >
-              {t === "calc" ? "Calculator" : `History (${history.length})`}
+              {t === "calc" ? "Calculator" : t === "crew" ? "Crew" : `History (${history.length})`}
             </button>
           ))}
         </div>
@@ -1068,7 +1146,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <input
                       style={{ ...inputStyle, flex: 1 }}
-                      type="number" min="20" max="50" step="1"
+                      type="number" min="20" max="50" step="any"
                       value={targetLaborPct}
                       onChange={e => {
                         const v = parseFloat(e.target.value);
@@ -1081,15 +1159,15 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     <span style={{ fontSize: "14px", color: COLORS.muted, whiteSpace: "nowrap" }}>$</span>
                     <input
                       style={{ ...inputStyle, flex: 1 }}
-                      type="number" min="0" step="50"
-                      value={laborDollarEdit !== null ? laborDollarEdit : (totalRev > 0 ? Math.round(laborBudget) : "")}
+                      type="number" min="0" step="any"
+                      value={laborDollarEdit !== null ? laborDollarEdit : (totalRev > 0 ? laborBudget.toFixed(2) : "")}
                       placeholder="0"
                       onFocus={e => setLaborDollarEdit(e.target.value)}
                       onChange={e => setLaborDollarEdit(e.target.value)}
                       onBlur={() => {
                         const dollars = parseFloat(laborDollarEdit) || 0;
                         if (totalRev > 0) {
-                          const pct = Math.round((dollars / totalRev) * 100);
+                          const pct = (dollars / totalRev) * 100;
                           setTargetLaborPct(Math.min(50, Math.max(20, pct)));
                         }
                         setLaborDollarEdit(null);
@@ -1099,7 +1177,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 </div>
                 <input
                   className="epp-slider"
-                  type="range" min="20" max="50" step="1"
+                  type="range" min="20" max="50" step="0.5"
                   value={targetLaborPct}
                   onChange={e => { setTargetLaborPct(parseFloat(e.target.value)); setLaborDollarEdit(null); }}
                   style={{ width: "100%", marginTop: "8px" }}
@@ -1166,7 +1244,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <input
                       style={{ ...inputStyle, flex: 1 }}
-                      type="number" min="5" max="25" step="0.5"
+                      type="number" min="5" max="25" step="any"
                       value={materialPctOverride}
                       onChange={e => setMaterialPctOverride(e.target.value)}
                       placeholder={(MAT_PCT[pkg] * 100).toFixed(0)}
@@ -1178,14 +1256,14 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     <input
                       style={{ ...inputStyle, flex: 1 }}
                       type="number" min="0" step="25"
-                      value={matDollarEdit !== null ? matDollarEdit : (totalRev > 0 ? Math.round(materialCost) : "")}
+                      value={matDollarEdit !== null ? matDollarEdit : (totalRev > 0 ? materialCost.toFixed(2) : "")}
                       placeholder="0"
                       onFocus={e => setMatDollarEdit(e.target.value)}
                       onChange={e => setMatDollarEdit(e.target.value)}
                       onBlur={() => {
                         const dollars = parseFloat(matDollarEdit) || 0;
                         if (totalRev > 0) {
-                          const pct = ((dollars / totalRev) * 100).toFixed(1);
+                          const pct = (dollars / totalRev) * 100;
                           setMaterialPctOverride(String(pct));
                         }
                         setMatDollarEdit(null);
@@ -1241,79 +1319,148 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               )}
 
               {materialItems.map(item => {
-                const product = paintCatalog.find(p => p.id === item.productId);
+                const isOther = item.productId === "__other__";
+                const product = isOther ? null : fullPaintCatalog.find(p => p.id === item.productId);
+                const unitPrice = isOther ? (item.customPrice || 0) : (product ? product.price : 0);
                 const bought = item.qtyPurchased || item.qty || 0;
                 const used = item.qtyUsed || 0;
                 const overUnder = bought - used;
-                const lineTotal = product ? product.price * bought : 0;
+                const lineTotal = unitPrice * bought;
                 return (
-                  <div key={item.id} style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 65px 65px 55px 70px 80px 28px",
-                    gap: "6px",
-                    alignItems: "center",
-                    padding: "10px 12px",
-                    background: "rgba(255,255,255,0.04)",
-                    borderRadius: "8px",
-                    marginBottom: "6px",
-                    border: "1px solid rgba(255,255,255,0.07)",
-                  }}>
-                    <select
-                      value={item.productId}
-                      onChange={e => setMaterialItems(materialItems.map(i =>
-                        i.id === item.id ? { ...i, productId: e.target.value } : i
-                      ))}
-                      style={inputStyle}
-                    >
-                      <option value="">Select paint</option>
-                      {paintCatalog.map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      placeholder="0"
-                      value={item.qtyPurchased || item.qty || ""}
-                      onChange={e => setMaterialItems(materialItems.map(i =>
-                        i.id === item.id ? { ...i, qtyPurchased: parseFloat(e.target.value) || 0 } : i
-                      ))}
-                      style={{ ...inputStyle, textAlign: "center", padding: "8px 4px" }}
-                    />
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      placeholder="0"
-                      value={item.qtyUsed || ""}
-                      onChange={e => setMaterialItems(materialItems.map(i =>
-                        i.id === item.id ? { ...i, qtyUsed: parseFloat(e.target.value) || 0 } : i
-                      ))}
-                      style={{ ...inputStyle, textAlign: "center", padding: "8px 4px" }}
-                    />
+                  <div key={item.id} style={{ marginBottom: "6px" }}>
                     <div style={{
-                      textAlign: "center", fontSize: "12px", fontWeight: 600,
-                      color: used === 0 ? COLORS.muted : overUnder > 0 ? COLORS.gold : overUnder < 0 ? COLORS.red : "#4ade80",
+                      display: "grid",
+                      gridTemplateColumns: "1fr 65px 65px 55px 70px 80px 28px",
+                      gap: "6px",
+                      alignItems: "center",
+                      padding: "10px 12px",
+                      background: "rgba(255,255,255,0.04)",
+                      borderRadius: isOther ? "8px 8px 0 0" : "8px",
+                      border: "1px solid rgba(255,255,255,0.07)",
                     }}>
-                      {used === 0 ? "--" : (overUnder > 0 ? "+" : "") + overUnder}
+                      <select
+                        value={item.productId}
+                        onChange={e => setMaterialItems(materialItems.map(i =>
+                          i.id === item.id ? { ...i, productId: e.target.value, customName: "", customPrice: 0, addToCatalog: false } : i
+                        ))}
+                        style={inputStyle}
+                      >
+                        <option value="">Select paint</option>
+                        {paintCatalog.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                        {customPaints.length > 0 && (
+                          <option disabled>--- Custom ---</option>
+                        )}
+                        {customPaints.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                        <option disabled>---</option>
+                        <option value="__other__">Other (custom)</option>
+                      </select>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="0"
+                        value={item.qtyPurchased || item.qty || ""}
+                        onChange={e => setMaterialItems(materialItems.map(i =>
+                          i.id === item.id ? { ...i, qtyPurchased: parseFloat(e.target.value) || 0 } : i
+                        ))}
+                        style={{ ...inputStyle, textAlign: "center", padding: "8px 4px" }}
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="0"
+                        value={item.qtyUsed || ""}
+                        onChange={e => setMaterialItems(materialItems.map(i =>
+                          i.id === item.id ? { ...i, qtyUsed: parseFloat(e.target.value) || 0 } : i
+                        ))}
+                        style={{ ...inputStyle, textAlign: "center", padding: "8px 4px" }}
+                      />
+                      <div style={{
+                        textAlign: "center", fontSize: "12px", fontWeight: 600,
+                        color: used === 0 ? COLORS.muted : overUnder > 0 ? COLORS.gold : overUnder < 0 ? COLORS.red : "#4ade80",
+                      }}>
+                        {used === 0 ? "--" : (overUnder > 0 ? "+" : "") + overUnder}
+                      </div>
+                      <div style={{ textAlign: "center", fontSize: "12px", color: COLORS.muted }}>
+                        {unitPrice > 0 ? fmt$(unitPrice) + "/gal" : "--"}
+                      </div>
+                      <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.goldLight, fontWeight: 600 }}>
+                        {lineTotal > 0 ? fmt$(lineTotal) : "--"}
+                      </div>
+                      <button
+                        onClick={() => setMaterialItems(materialItems.filter(i => i.id !== item.id))}
+                        style={{
+                          background: "none", border: "none", color: COLORS.muted,
+                          cursor: "pointer", fontSize: "16px", padding: "0", lineHeight: 1,
+                          transition: "color 0.15s",
+                        }}
+                        onMouseEnter={e => e.target.style.color = COLORS.red}
+                        onMouseLeave={e => e.target.style.color = COLORS.muted}
+                      >x</button>
                     </div>
-                    <div style={{ textAlign: "center", fontSize: "12px", color: COLORS.muted }}>
-                      {product ? fmt$(product.price) + "/" + product.unit : "--"}
-                    </div>
-                    <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.goldLight, fontWeight: 600 }}>
-                      {lineTotal > 0 ? fmt$(lineTotal) : "--"}
-                    </div>
-                    <button
-                      onClick={() => setMaterialItems(materialItems.filter(i => i.id !== item.id))}
-                      style={{
-                        background: "none", border: "none", color: COLORS.muted,
-                        cursor: "pointer", fontSize: "16px", padding: "0", lineHeight: 1,
-                        transition: "color 0.15s",
-                      }}
-                      onMouseEnter={e => e.target.style.color = COLORS.red}
-                      onMouseLeave={e => e.target.style.color = COLORS.muted}
-                    >x</button>
+                    {isOther && (
+                      <div style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 90px auto",
+                        gap: "8px",
+                        alignItems: "center",
+                        padding: "8px 12px",
+                        background: "rgba(200,151,42,0.06)",
+                        borderRadius: "0 0 8px 8px",
+                        border: "1px solid rgba(255,255,255,0.07)",
+                        borderTop: "none",
+                      }}>
+                        <input
+                          type="text"
+                          placeholder="Product name"
+                          value={item.customName || ""}
+                          onChange={e => setMaterialItems(materialItems.map(i =>
+                            i.id === item.id ? { ...i, customName: e.target.value } : i
+                          ))}
+                          style={{ ...inputStyle, fontSize: "12px" }}
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          placeholder="$/gal"
+                          value={item.customPrice || ""}
+                          onChange={e => setMaterialItems(materialItems.map(i =>
+                            i.id === item.id ? { ...i, customPrice: parseFloat(e.target.value) || 0 } : i
+                          ))}
+                          style={{ ...inputStyle, fontSize: "12px", textAlign: "center" }}
+                        />
+                        <label style={{ display: "flex", alignItems: "center", gap: "5px", cursor: "pointer", fontSize: "11px", color: COLORS.muted, whiteSpace: "nowrap" }}>
+                          <input
+                            type="checkbox"
+                            checked={item.addToCatalog || false}
+                            onChange={e => {
+                              const checked = e.target.checked;
+                              setMaterialItems(materialItems.map(i =>
+                                i.id === item.id ? { ...i, addToCatalog: checked } : i
+                              ));
+                              if (checked && item.customName && item.customPrice > 0) {
+                                const newId = "custom-" + Date.now();
+                                const newProduct = { id: newId, name: item.customName, unit: "gal", price: item.customPrice };
+                                const updated = [...customPaints, newProduct];
+                                setCustomPaints(updated);
+                                saveCustomPaints(updated);
+                                setMaterialItems(materialItems.map(i =>
+                                  i.id === item.id ? { ...i, productId: newId, addToCatalog: false } : i
+                                ));
+                              }
+                            }}
+                            style={{ accentColor: COLORS.gold }}
+                          />
+                          Add to catalog
+                        </label>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1661,6 +1808,179 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
           </>
         )}
 
+        {/* ── CREW CAPACITY TAB ── */}
+        {tab === "crew" && (() => {
+          const leads = teamLeadList.filter(l => l !== "N/A");
+          const weeks = [0, 1, 2, 3].map(i => ({
+            offset: capacityWeekOffset + i,
+            label: getWeekLabel(capacityWeekOffset + i),
+            days: getWeekDates(capacityWeekOffset + i),
+          }));
+
+          const today = new Date().toISOString().slice(0, 10);
+
+          function toggleStatus(lead, dateStr) {
+            const key = `${lead}|${dateStr}`;
+            const current = crewCapacity[key] || "available";
+            const nextIdx = (CAPACITY_STATUSES.indexOf(current) + 1) % CAPACITY_STATUSES.length;
+            const updated = { ...crewCapacity, [key]: CAPACITY_STATUSES[nextIdx] };
+            setCrewCapacity(updated);
+            saveCrewCapacity(updated);
+          }
+
+          return (
+            <>
+              <div style={cardStyle}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                  <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                    Crew Capacity
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <button
+                      onClick={() => setCapacityWeekOffset(capacityWeekOffset - 1)}
+                      style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "6px", color: COLORS.offWhite, padding: "4px 10px", cursor: "pointer", fontSize: "13px" }}
+                    >&larr;</button>
+                    <button
+                      onClick={() => setCapacityWeekOffset(-2)}
+                      style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "6px", color: COLORS.muted, padding: "4px 10px", cursor: "pointer", fontSize: "11px" }}
+                    >Today</button>
+                    <button
+                      onClick={() => setCapacityWeekOffset(capacityWeekOffset + 1)}
+                      style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "6px", color: COLORS.offWhite, padding: "4px 10px", cursor: "pointer", fontSize: "13px" }}
+                    >&rarr;</button>
+                  </div>
+                </div>
+
+                {/* Legend */}
+                <div style={{ display: "flex", gap: "16px", marginBottom: "16px", fontSize: "11px" }}>
+                  {CAPACITY_STATUSES.map(s => (
+                    <div key={s} style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                      <div style={{ width: "10px", height: "10px", borderRadius: "3px", background: CAPACITY_COLORS[s] }} />
+                      <span style={{ color: COLORS.muted }}>{CAPACITY_LABELS[s]}</span>
+                    </div>
+                  ))}
+                  <div style={{ marginLeft: "auto", color: COLORS.muted, fontStyle: "italic" }}>
+                    Click a cell to cycle status
+                  </div>
+                </div>
+
+                {weeks.map(week => {
+                  const weekAvailCount = leads.reduce((sum, lead) => {
+                    const availDays = week.days.filter(d => (crewCapacity[`${lead}|${d}`] || "available") === "available").length;
+                    return sum + availDays;
+                  }, 0);
+                  const totalSlots = leads.length * week.days.length;
+                  const weekCapPct = totalSlots > 0 ? weekAvailCount / totalSlots : 0;
+                  const capColor = weekCapPct >= 0.5 ? COLORS.green : weekCapPct >= 0.25 ? COLORS.yellow : COLORS.red;
+
+                  return (
+                    <div key={week.offset} style={{ marginBottom: "20px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                        <div style={{ fontWeight: 600, fontSize: "12px", color: COLORS.offWhite }}>{week.label}</div>
+                        <div style={{
+                          fontSize: "11px", fontWeight: 700, color: capColor,
+                          background: capColor + "22", borderRadius: "6px", padding: "3px 8px",
+                        }}>
+                          {(weekCapPct * 100).toFixed(0)}% Available
+                        </div>
+                      </div>
+
+                      {/* Day headers */}
+                      <div style={{
+                        display: "grid",
+                        gridTemplateColumns: "130px repeat(5, 1fr)",
+                        gap: "3px",
+                        marginBottom: "3px",
+                      }}>
+                        <div />
+                        {week.days.map(d => (
+                          <div key={d} style={{
+                            textAlign: "center", fontSize: "10px", color: d === today ? COLORS.gold : COLORS.muted,
+                            fontWeight: d === today ? 700 : 400,
+                          }}>
+                            {getDayLabel(d)} {getDateLabel(d)}
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Lead rows */}
+                      {leads.map(lead => (
+                        <div key={lead} style={{
+                          display: "grid",
+                          gridTemplateColumns: "130px repeat(5, 1fr)",
+                          gap: "3px",
+                          marginBottom: "2px",
+                        }}>
+                          <div style={{
+                            fontSize: "11px", color: COLORS.offWhite, padding: "6px 8px",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }} title={lead}>
+                            {lead.split(" (")[0]}
+                          </div>
+                          {week.days.map(d => {
+                            const status = crewCapacity[`${lead}|${d}`] || "available";
+                            const isPast = d < today;
+                            return (
+                              <button
+                                key={d}
+                                onClick={() => toggleStatus(lead, d)}
+                                title={`${lead.split(" (")[0]} - ${getDayLabel(d)} ${getDateLabel(d)}: ${CAPACITY_LABELS[status]}`}
+                                style={{
+                                  background: CAPACITY_COLORS[status] + (isPast ? "44" : "33"),
+                                  border: d === today ? `2px solid ${COLORS.gold}` : "1px solid transparent",
+                                  borderRadius: "4px",
+                                  padding: "6px 2px",
+                                  cursor: "pointer",
+                                  fontSize: "9px",
+                                  fontWeight: 600,
+                                  color: CAPACITY_COLORS[status],
+                                  textAlign: "center",
+                                  transition: "all 0.1s",
+                                  opacity: isPast ? 0.6 : 1,
+                                }}
+                              >
+                                {status === "available" ? "A" : status === "on-job" ? "J" : "X"}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Weekly summary */}
+              <div style={cardStyle}>
+                <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: "12px" }}>
+                  Weekly Summary
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px" }}>
+                  {weeks.map(week => {
+                    const dayAvails = week.days.map(d => {
+                      const avail = leads.filter(l => (crewCapacity[`${l}|${d}`] || "available") === "available").length;
+                      return avail;
+                    });
+                    const avgAvail = dayAvails.reduce((s, v) => s + v, 0) / dayAvails.length;
+                    const onJob = leads.filter(l =>
+                      week.days.some(d => (crewCapacity[`${l}|${d}`] || "available") === "on-job")
+                    ).length;
+
+                    return (
+                      <div key={week.offset} style={{ textAlign: "center", padding: "10px", background: "rgba(255,255,255,0.03)", borderRadius: "8px" }}>
+                        <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", marginBottom: "6px" }}>{week.label}</div>
+                        <div style={{ fontSize: "20px", fontWeight: 700, color: COLORS.goldLight }}>{avgAvail.toFixed(1)}</div>
+                        <div style={{ fontSize: "10px", color: COLORS.muted }}>avg leads/day</div>
+                        <div style={{ fontSize: "11px", color: COLORS.gold, marginTop: "4px" }}>{onJob} on jobs</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          );
+        })()}
+
         {/* ── HISTORY TAB ── */}
         {tab === "history" && (() => {
           const filteredHistory = history.filter(j => {
@@ -1754,7 +2074,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             {/* Summary row - uses filtered data */}
             {filteredHistory.length > 0 && (() => {
               const withGP = filteredHistory.filter(j => j.revenue > 0);
-              const totalRev = withGP.reduce((s, j) => s + j.revenue, 0);
+              const totalRev = withGP.reduce((s, j) => s + j.revenue + (j.changeOrderRev || 0), 0);
               const totalGP = withGP.reduce((s, j) => s + j.gpDollar, 0);
               const avgGP = totalRev > 0 ? totalGP / totalRev : 0;
               return (
@@ -1798,7 +2118,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             )}
 
             {filteredHistory.map(job => (
-              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={paintCatalog} teamLeadList={teamLeadList} />
+              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={fullPaintCatalog} teamLeadList={teamLeadList} />
             ))}
           </>
           );
