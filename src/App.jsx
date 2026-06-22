@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import * as XLSX from "xlsx";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
@@ -67,6 +68,56 @@ const FALLBACK_PKG_MAP = {
   Gold: { int: "dur-int", ext: "dur-ext" },
   Platinum: { int: "em-int", ext: "em-ext" },
 };
+
+// SW invoice abbreviation -> catalog ID mapping
+const SW_PRODUCT_MAP = {
+  "SPR INT SA": "sp-int",
+  "SPR INT FL": "sp-int",
+  "SPR EXT SA": "sp-ext",
+  "SPR EXT FL": "sp-ext",
+  "DURATION EX SA": "dur-ext",
+  "DURATION EX FL": "dur-ext",
+  "DUR HOME SA": "dur-int",
+  "DUR HOME FL": "dur-int",
+  "EMERALD IN SA": "em-int",
+  "EMERALD IN FL": "em-int",
+  "EMERALD EXSA": "em-ext",
+  "EMRLD RNRF EXSA": "em-ext",
+  "EMERALD UTE": "em-ute",
+  "PM 400": "pm400",
+  "PROBLK": "xbond",
+};
+
+function mapSwProduct(desc, catalog, customPaints) {
+  const upper = (desc || "").toUpperCase().trim();
+  for (const [prefix, catalogId] of Object.entries(SW_PRODUCT_MAP)) {
+    if (upper.startsWith(prefix)) return catalogId;
+  }
+  const allProducts = [...catalog, ...customPaints];
+  const match = allProducts.find(p =>
+    upper.includes(p.name.toUpperCase()) || p.name.toUpperCase().includes(upper)
+  );
+  if (match) return match.id;
+  return null;
+}
+
+function parseSwXlsx(data) {
+  const workbook = XLSX.read(data, { type: "array" });
+  const sheetName = workbook.SheetNames.find(n => n.toLowerCase().includes("project+product") || n.toLowerCase().includes("gallons by"));
+  if (!sheetName) return { items: [], error: "Could not find 'Gallons by Project+Product' sheet" };
+  const sheet = workbook.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  const items = rows
+    .filter(r => r["PO / Project"] && r["Description"])
+    .map(r => ({
+      po: String(r["PO / Project"]).trim(),
+      productCode: String(r["Product Code"] || "").trim(),
+      description: String(r["Description"]).trim(),
+      gallons: parseFloat(r["Gallons"]) || 0,
+      spend: parseFloat(r["Spend"]) || 0,
+    }));
+  return { items, error: null };
+}
 
 function parsePricesMd(text) {
   const lines = text.split("\n");
@@ -846,6 +897,9 @@ export default function App() {
   const [importMsg, setImportMsg] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
+
+  // Materials import state
+  const [matImport, setMatImport] = useState(null);
 
   useEffect(() => {
     loadHistory().then(h => { setHistory(h); setHistoryLoaded(true); });
@@ -2012,6 +2066,52 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   <input type="file" accept=".csv" onChange={handleImportCsv}
                     style={{ display: "none" }} />
                 </label>
+                <label style={{
+                  fontSize: "11px", fontWeight: 600, color: COLORS.goldLight,
+                  background: COLORS.gold + "22", border: `1px solid ${COLORS.gold}44`,
+                  borderRadius: "6px", padding: "4px 10px", cursor: "pointer",
+                }}>
+                  Import Materials
+                  <input type="file" accept=".xlsx,.xls" onChange={e => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = evt => {
+                      const data = new Uint8Array(evt.target.result);
+                      const { items, error } = parseSwXlsx(data);
+                      if (error) { setImportMsg(error); return; }
+
+                      const grouped = {};
+                      for (const item of items) {
+                        if (!grouped[item.po]) grouped[item.po] = [];
+                        grouped[item.po].push(item);
+                      }
+
+                      const isNumericPO = po => /^\d+$/.test(po);
+                      const preview = Object.entries(grouped).map(([po, products]) => {
+                        const matchedJob = history.find(j => String(j.projectId) === po);
+                        const mappedProducts = products.map(p => {
+                          const catalogId = mapSwProduct(p.description, paintCatalog, customPaints);
+                          const unitPrice = p.gallons > 0 ? p.spend / p.gallons : 0;
+                          return { ...p, catalogId, unitPrice };
+                        });
+                        return {
+                          po,
+                          isNumeric: isNumericPO(po),
+                          matchedJob,
+                          products: mappedProducts,
+                          totalGallons: products.reduce((s, p) => s + p.gallons, 0),
+                          totalSpend: products.reduce((s, p) => s + p.spend, 0),
+                        };
+                      });
+
+                      preview.sort((a, b) => (a.matchedJob ? 0 : 1) - (b.matchedJob ? 0 : 1));
+                      setMatImport(preview);
+                    };
+                    reader.readAsArrayBuffer(file);
+                    e.target.value = "";
+                  }} style={{ display: "none" }} />
+                </label>
                 {history.length > 0 && (
                   <button onClick={() => exportHistoryCsv(filteredHistory)} style={{
                     fontSize: "11px", fontWeight: 600, color: COLORS.goldLight,
@@ -2030,6 +2130,188 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 border: `1px solid ${COLORS.green}33`, borderRadius: "8px",
                 padding: "8px 14px", marginBottom: "12px",
               }}>{importMsg}</div>
+            )}
+
+            {/* Materials Import Preview */}
+            {matImport && (
+              <div style={{
+                ...cardStyle,
+                border: `1px solid ${COLORS.gold}44`,
+                marginBottom: "16px",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                  <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    Materials Import Preview
+                  </div>
+                  <button
+                    onClick={() => setMatImport(null)}
+                    style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "16px" }}
+                  >x</button>
+                </div>
+
+                {/* Summary */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "10px", marginBottom: "16px" }}>
+                  {[
+                    ["Matched Jobs", matImport.filter(m => m.matchedJob).length],
+                    ["Unmatched POs", matImport.filter(m => !m.matchedJob && m.isNumeric).length],
+                    ["Skipped (non-PO)", matImport.filter(m => !m.isNumeric).length],
+                  ].map(([label, val]) => (
+                    <div key={label} style={{ textAlign: "center", padding: "8px", background: "rgba(255,255,255,0.03)", borderRadius: "8px" }}>
+                      <div style={{ fontSize: "18px", fontWeight: 700, color: COLORS.goldLight }}>{val}</div>
+                      <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase" }}>{label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Matched jobs */}
+                {matImport.filter(m => m.matchedJob).length > 0 && (
+                  <div style={{ marginBottom: "16px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: 600, color: COLORS.green, textTransform: "uppercase", marginBottom: "8px" }}>
+                      Matched - will overwrite paint items
+                    </div>
+                    {matImport.filter(m => m.matchedJob).map(m => (
+                      <div key={m.po} style={{
+                        padding: "10px 12px", marginBottom: "4px", borderRadius: "8px",
+                        background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)",
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                          <div>
+                            <span style={{ fontWeight: 600, fontSize: "13px", color: COLORS.offWhite }}>{m.matchedJob.clientName}</span>
+                            <span style={{ fontSize: "11px", color: COLORS.muted, marginLeft: "8px" }}>PO #{m.po}</span>
+                          </div>
+                          <span style={{ fontSize: "12px", color: COLORS.muted }}>{m.totalGallons} gal | {fmt$(m.totalSpend)}</span>
+                        </div>
+                        {m.products.map((p, i) => (
+                          <div key={i} style={{ fontSize: "11px", color: COLORS.offWhite, marginLeft: "12px", marginBottom: "2px" }}>
+                            {p.catalogId ? (
+                              <span style={{ color: COLORS.green }}>*</span>
+                            ) : (
+                              <span style={{ color: COLORS.yellow }}>+</span>
+                            )}
+                            {" "}{p.description} - {p.gallons} gal ({fmt$(p.unitPrice)}/gal)
+                            {p.catalogId && <span style={{ fontSize: "10px", color: COLORS.muted, marginLeft: "6px" }}>
+                              mapped to: {paintCatalog.find(c => c.id === p.catalogId)?.name || p.catalogId}
+                            </span>}
+                            {!p.catalogId && <span style={{ fontSize: "10px", color: COLORS.yellow, marginLeft: "6px" }}>
+                              (will add as custom)
+                            </span>}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Unmatched numeric POs */}
+                {matImport.filter(m => !m.matchedJob && m.isNumeric).length > 0 && (
+                  <div style={{ marginBottom: "16px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: 600, color: COLORS.yellow, textTransform: "uppercase", marginBottom: "8px" }}>
+                      Unmatched POs - no job found with this Project ID
+                    </div>
+                    {matImport.filter(m => !m.matchedJob && m.isNumeric).map(m => (
+                      <div key={m.po} style={{
+                        padding: "8px 12px", marginBottom: "4px", borderRadius: "8px",
+                        background: "rgba(234,179,8,0.06)", border: "1px solid rgba(234,179,8,0.15)",
+                        fontSize: "12px", color: COLORS.offWhite,
+                      }}>
+                        PO #{m.po} - {m.totalGallons} gal | {fmt$(m.totalSpend)} | {m.products.length} products
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Skipped non-numeric POs */}
+                {matImport.filter(m => !m.isNumeric).length > 0 && (
+                  <div style={{ marginBottom: "16px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: 600, color: COLORS.muted, textTransform: "uppercase", marginBottom: "8px" }}>
+                      Skipped - non-numeric PO (likely not a DripJobs ID)
+                    </div>
+                    {matImport.filter(m => !m.isNumeric).map(m => (
+                      <div key={m.po} style={{
+                        padding: "8px 12px", marginBottom: "4px", borderRadius: "8px",
+                        background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
+                        fontSize: "12px", color: COLORS.muted,
+                      }}>
+                        "{m.po}" - {m.totalGallons} gal | {fmt$(m.totalSpend)} | {m.products.length} products
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Apply button */}
+                <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => setMatImport(null)}
+                    style={{
+                      fontSize: "12px", fontWeight: 600, color: COLORS.muted,
+                      background: "transparent", border: `1px solid rgba(255,255,255,0.15)`,
+                      borderRadius: "6px", padding: "8px 16px", cursor: "pointer",
+                    }}
+                  >Cancel</button>
+                  <button
+                    onClick={() => {
+                      const matched = matImport.filter(m => m.matchedJob);
+                      if (matched.length === 0) { setMatImport(null); return; }
+
+                      const newCustom = [];
+                      const updatedHistory = history.map(job => {
+                        const match = matched.find(m => String(job.projectId) === m.po);
+                        if (!match) return job;
+
+                        const paintItems = match.products.map(p => {
+                          if (p.catalogId) {
+                            return {
+                              productId: p.catalogId,
+                              qtyPurchased: p.gallons,
+                              qtyUsed: 0,
+                            };
+                          }
+                          const existingCustom = customPaints.find(c => c.name === p.description);
+                          const alreadyQueued = newCustom.find(c => c.name === p.description);
+                          let customId;
+                          if (existingCustom) {
+                            customId = existingCustom.id;
+                          } else if (alreadyQueued) {
+                            customId = alreadyQueued.id;
+                          } else {
+                            customId = "sw-" + p.description.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30);
+                            newCustom.push({ id: customId, name: p.description, unit: "gal", price: p.unitPrice });
+                          }
+                          return {
+                            productId: customId,
+                            qtyPurchased: p.gallons,
+                            qtyUsed: 0,
+                          };
+                        });
+
+                        return { ...job, paintItems };
+                      });
+
+                      if (newCustom.length > 0) {
+                        const allCustom = [...customPaints, ...newCustom];
+                        setCustomPaints(allCustom);
+                        saveCustomPaints(allCustom);
+                      }
+
+                      setHistory(updatedHistory);
+                      saveHistory(updatedHistory);
+                      setImportMsg(`Materials imported: ${matched.length} jobs updated, ${newCustom.length} new products added to catalog.`);
+                      setMatImport(null);
+                      setTimeout(() => setImportMsg(""), 8000);
+                    }}
+                    disabled={matImport.filter(m => m.matchedJob).length === 0}
+                    style={{
+                      fontSize: "12px", fontWeight: 700,
+                      color: COLORS.charcoal,
+                      background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
+                      border: "none", borderRadius: "6px", padding: "8px 20px", cursor: "pointer",
+                      opacity: matImport.filter(m => m.matchedJob).length === 0 ? 0.5 : 1,
+                    }}
+                  >
+                    Apply to {matImport.filter(m => m.matchedJob).length} Jobs
+                  </button>
+                </div>
+              </div>
             )}
 
             {/* Date filter */}
