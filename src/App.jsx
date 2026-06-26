@@ -1,5 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
+import {
+  loadHistory, saveHistory,
+  loadTeamLeads, saveTeamLeads,
+  loadCrewCapacity, saveCrewCapacity,
+  loadCustomPaints, saveCustomPaints,
+  onHistoryChange, onTeamLeadsChange,
+  onCrewCapacityChange, onCustomPaintsChange,
+} from "./firebase.js";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
@@ -210,59 +218,40 @@ function gpLabel(gp, target) {
   return "BELOW TARGET";
 }
 
-// ─── STORAGE ─────────────────────────────────────────────────────────────────
-
-async function loadHistory() {
-  try {
-    const r = await window.storage.get("epp_job_history");
-    return r ? JSON.parse(r.value) : [];
-  } catch { return []; }
+// Unit price for a paint item, resolving custom ("Other") and catalog products.
+function paintItemUnitPrice(item, catalog) {
+  if (!item) return 0;
+  if (item.productId === "__other__") return item.customPrice || 0;
+  const p = catalog.find(c => c.id === item.productId);
+  return p ? p.price : 0;
 }
 
-async function saveHistory(history) {
-  try {
-    await window.storage.set("epp_job_history", JSON.stringify(history));
-  } catch (e) { /* ignore */ }
+// Materials cost breakdown for a job. `manualRaw` is the manual dollar input:
+// a finite number (incl. 0) counts as "entered"; "" / null / undefined means
+// not entered, in which case the purchased total drives the effective cost.
+// Effective cost is what feeds GP. Differential = purchased - used (leftover $).
+function materialBreakdown(paintItems, manualRaw, catalog) {
+  const items = paintItems || [];
+  const fromPurchased = items.reduce(
+    (s, pi) => s + paintItemUnitPrice(pi, catalog) * (pi.qtyPurchased || pi.qty || 0), 0);
+  const fromUsed = items.reduce(
+    (s, pi) => s + paintItemUnitPrice(pi, catalog) * (pi.qtyUsed || 0), 0);
+  const n = Number(manualRaw);
+  const hasManual = manualRaw !== "" && manualRaw !== null && manualRaw !== undefined && !Number.isNaN(n);
+  const manual = hasManual ? n : null;
+  const effective = hasManual ? manual : fromPurchased;
+  return {
+    fromPurchased,
+    fromUsed,
+    manual,
+    hasManual,
+    effective,
+    source: hasManual ? "M" : "P",
+    differential: fromPurchased - fromUsed,
+  };
 }
 
-async function loadTeamLeads() {
-  try {
-    const r = await window.storage.get("epp_team_leads");
-    return r ? JSON.parse(r.value) : DEFAULT_TEAM_LEADS;
-  } catch { return DEFAULT_TEAM_LEADS; }
-}
-
-async function saveTeamLeads(leads) {
-  try {
-    await window.storage.set("epp_team_leads", JSON.stringify(leads));
-  } catch { /* ignore */ }
-}
-
-async function loadCrewCapacity() {
-  try {
-    const r = await window.storage.get("epp_crew_capacity");
-    return r ? JSON.parse(r.value) : {};
-  } catch { return {}; }
-}
-
-async function saveCrewCapacity(data) {
-  try {
-    await window.storage.set("epp_crew_capacity", JSON.stringify(data));
-  } catch { /* ignore */ }
-}
-
-async function loadCustomPaints() {
-  try {
-    const r = await window.storage.get("epp_custom_paints");
-    return r ? JSON.parse(r.value) : [];
-  } catch { return []; }
-}
-
-async function saveCustomPaints(paints) {
-  try {
-    await window.storage.set("epp_custom_paints", JSON.stringify(paints));
-  } catch { /* ignore */ }
-}
+// ─── STORAGE (Firestore - see firebase.js) ──────────────────────────────────
 
 const CAPACITY_STATUSES = ["available", "on-job", "unavailable"];
 const CAPACITY_LABELS = { available: "Available", "on-job": "On Job", unavailable: "Unavailable" };
@@ -306,6 +295,7 @@ const CSV_COLUMNS = [
   "date", "dateCompleted", "clientName", "projectId", "projectType", "package",
   "salesperson", "pm", "teamLead", "revenue", "changeOrderRev",
   "laborBudget", "laborPct", "materialCost", "materialPct",
+  "materialCostManual", "materialFromPurchased", "materialFromUsed", "materialDifferential",
   "gpDollar", "gpPct", "crewSize", "totalDays", "manDays", "totalManHours",
   "crewSummary",
 ];
@@ -314,6 +304,7 @@ const CSV_HEADERS = [
   "Date Saved", "Date Completed", "Client", "Project ID", "Project Type", "Package",
   "Salesperson", "PM", "Team Lead", "Revenue", "Change Orders",
   "Labor Budget", "Labor %", "Material Cost", "Material %",
+  "Material (Manual)", "Material (Purchased)", "Material (Used)", "Material Diff",
   "Est. GP $", "GP %", "# Guys", "Total Days", "Man-Days", "Man Hours",
   "Crew",
 ];
@@ -336,7 +327,11 @@ function jobToCsvRow(job) {
     if (col === "dateCompleted") return escCsv(job.dateCompleted || "");
     if (col === "laborPct" || col === "materialPct" || col === "gpPct")
       return escCsv(((job[col] || 0) * 100).toFixed(1));
-    if (col === "revenue" || col === "changeOrderRev" || col === "laborBudget" || col === "materialCost" || col === "gpDollar")
+    if (col === "materialCostManual")
+      return escCsv(job.materialCostManual === "" || job.materialCostManual === null || job.materialCostManual === undefined
+        ? "" : (Number(job.materialCostManual) || 0).toFixed(2));
+    if (col === "revenue" || col === "changeOrderRev" || col === "laborBudget" || col === "materialCost" || col === "gpDollar"
+        || col === "materialFromPurchased" || col === "materialFromUsed" || col === "materialDifferential")
       return escCsv((job[col] || 0).toFixed(2));
     return escCsv(job[col]);
   }).join(",");
@@ -540,10 +535,22 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
   const target = GP_TARGETS[job.projectType] || 0.5;
   const color = gpColor(job.gpPct, target);
 
+  // Materials breakdown for the read-only view (computed live so it is correct
+  // even for jobs saved before the breakdown fields existed).
+  const viewManualRaw = job.materialCostManual !== undefined && job.materialCostManual !== null
+    ? job.materialCostManual
+    : (job.materialCost ?? "");
+  const viewMb = materialBreakdown(job.paintItems, viewManualRaw, paintCatalog);
+
   function startEdit(e) {
     e.stopPropagation();
     setDraft({
       ...job,
+      // Manual material cost: prefer an explicit stored manual value; fall back
+      // to the existing materialCost so pre-existing jobs keep their figure.
+      materialCostManual: job.materialCostManual !== undefined && job.materialCostManual !== null
+        ? job.materialCostManual
+        : (job.materialCost ?? ""),
       salesperson: job.salesperson || SALESPERSON_LIST[0],
       pm: job.pm || PM_LIST[0],
       teamLead: job.teamLead || teamLeadList[0],
@@ -567,16 +574,31 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
     const co = parseNum(draft.changeOrderRev);
     const totalRev = rev + co;
     const lab = parseNum(draft.laborBudget);
-    const mat = parseNum(draft.materialCost);
     const days = parseNum(draft.totalDays);
     const guys = parseNum(draft.crewSize) || 0;
     const md = guys * days;
+    const cleanItems = (draft.paintItems || []).filter(pi => pi.productId).map(pi => ({
+      productId: pi.productId,
+      qtyPurchased: pi.qtyPurchased || 0,
+      qtyUsed: pi.qtyUsed || 0,
+      ...(pi.productId === "__other__" ? { customName: pi.customName || "", customPrice: pi.customPrice || 0 } : {}),
+    }));
+    // Manual material cost: blank string stays blank (= not entered -> use purchased).
+    const manualRaw = draft.materialCostManual === "" || draft.materialCostManual === null || draft.materialCostManual === undefined
+      ? "" : parseNum(draft.materialCostManual);
+    const mb = materialBreakdown(cleanItems, manualRaw, paintCatalog);
+    const mat = mb.effective;
     const updated = {
       ...draft,
       revenue: rev,
       laborBudget: lab,
       laborPct: totalRev > 0 ? lab / totalRev : 0,
       materialCost: mat,
+      materialCostManual: manualRaw,
+      materialFromPurchased: mb.fromPurchased,
+      materialFromUsed: mb.fromUsed,
+      materialDifferential: mb.differential,
+      materialSource: mb.source,
       materialPct: totalRev > 0 ? mat / totalRev : 0,
       gpDollar: totalRev - lab - mat,
       gpPct: totalRev > 0 ? (totalRev - lab - mat) / totalRev : 0,
@@ -585,11 +607,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
       manDays: md,
       totalManHours: md * 8,
       changeOrderRev: co,
-      paintItems: (draft.paintItems || []).filter(pi => pi.productId).map(pi => ({
-        productId: pi.productId,
-        qtyPurchased: pi.qtyPurchased || 0,
-        qtyUsed: pi.qtyUsed || 0,
-      })),
+      paintItems: cleanItems,
     };
     onUpdate(updated);
     setDraft(null);
@@ -655,7 +673,6 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
               ["Days", (job.totalDays || 0) + " days"],
               ["Man-Days", (job.manDays || 0) + " man-days"],
               ["Labor Budget", fmt$(job.laborBudget) + " (" + fmtPct(job.laborPct) + ")"],
-              ["Material Est.", fmt$(job.materialCost) + " (" + fmtPct(job.materialPct) + ")"],
               ["GP Target", fmtPct(target)],
             ].map(([label, val]) => (
               <div key={label}>
@@ -663,6 +680,44 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
                 <div style={{ fontSize: "13px", color: COLORS.offWhite, marginTop: "2px" }}>{val || "--"}</div>
               </div>
             ))}
+          </div>
+
+          {/* Materials cost breakdown */}
+          <div style={{
+            display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px",
+            marginBottom: "12px", padding: "10px 12px",
+            background: "rgba(255,255,255,0.03)", borderRadius: "8px",
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}>
+            <div>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: "5px" }}>
+                Material Cost <SourceBadge source={viewMb.source} />
+              </div>
+              <div style={{ fontSize: "14px", fontWeight: 700, color: COLORS.offWhite, marginTop: "2px" }}>
+                {fmt$(viewMb.effective)} <span style={{ fontSize: "11px", fontWeight: 400, color: COLORS.muted }}>({fmtPct(job.materialPct || 0)})</span>
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Manual</div>
+              <div style={{ fontSize: "13px", color: COLORS.offWhite, marginTop: "2px" }}>{viewMb.hasManual ? fmt$(viewMb.manual) : "--"}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>From Purchased</div>
+              <div style={{ fontSize: "13px", color: COLORS.offWhite, marginTop: "2px" }}>{fmt$(viewMb.fromPurchased)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>From Used</div>
+              <div style={{ fontSize: "13px", color: COLORS.offWhite, marginTop: "2px" }}>{fmt$(viewMb.fromUsed)}</div>
+            </div>
+            <div style={{ gridColumn: "1 / -1", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "8px" }}>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Differential <span style={{ textTransform: "none" }}>(purchased − used = leftover paint $)</span>
+              </div>
+              <div style={{ fontSize: "13px", fontWeight: 600, marginTop: "2px", color: viewMb.differential > 0 ? COLORS.gold : viewMb.differential < 0 ? COLORS.red : "#4ade80" }}>
+                {viewMb.differential > 0 ? "+" : ""}{fmt$(viewMb.differential)}
+                {viewMb.fromUsed > 0 ? "" : <span style={{ fontSize: "11px", fontWeight: 400, color: COLORS.muted }}> · enter "used" qtys to track waste</span>}
+              </div>
+            </div>
           </div>
           {job.crew && job.crew.length > 0 && (
             <div>
@@ -753,8 +808,9 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
               <input style={editInputStyle} type="number" value={draft.laborBudget} onChange={e => updateDraft("laborBudget", e.target.value)} />
             </div>
             <div>
-              <div style={editLabelStyle}>Material Cost ($)</div>
-              <input style={editInputStyle} type="number" value={draft.materialCost} onChange={e => updateDraft("materialCost", e.target.value)} />
+              <div style={editLabelStyle}>Material Cost — manual ($)</div>
+              <input style={editInputStyle} type="number" placeholder="blank = use purchased"
+                value={draft.materialCostManual ?? ""} onChange={e => updateDraft("materialCostManual", e.target.value)} />
             </div>
             <div>
               <div style={editLabelStyle}># Guys</div>
@@ -803,6 +859,42 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
               }}>+ Add paint item</button>
           </div>
 
+          {/* Live material cost breakdown (reflects edits above) */}
+          {(() => {
+            const manualRaw = draft.materialCostManual === "" || draft.materialCostManual === null || draft.materialCostManual === undefined
+              ? "" : parseNum(draft.materialCostManual);
+            const mb = materialBreakdown(draft.paintItems, manualRaw, paintCatalog);
+            return (
+              <div style={{
+                display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px",
+                marginBottom: "12px", padding: "10px 12px",
+                background: "rgba(255,255,255,0.03)", borderRadius: "8px",
+                border: "1px solid rgba(255,255,255,0.06)",
+              }}>
+                <div>
+                  <div style={{ ...editLabelStyle, display: "flex", alignItems: "center", gap: "5px" }}>
+                    Drives GP <SourceBadge source={mb.source} />
+                  </div>
+                  <div style={{ fontSize: "14px", fontWeight: 700, color: COLORS.goldLight, marginTop: "2px" }}>{fmt$(mb.effective)}</div>
+                </div>
+                <div>
+                  <div style={editLabelStyle}>From Purchased</div>
+                  <div style={{ fontSize: "13px", color: COLORS.offWhite, marginTop: "2px" }}>{fmt$(mb.fromPurchased)}</div>
+                </div>
+                <div>
+                  <div style={editLabelStyle}>From Used</div>
+                  <div style={{ fontSize: "13px", color: COLORS.offWhite, marginTop: "2px" }}>{fmt$(mb.fromUsed)}</div>
+                </div>
+                <div>
+                  <div style={editLabelStyle}>Differential</div>
+                  <div style={{ fontSize: "13px", fontWeight: 600, marginTop: "2px", color: mb.differential > 0 ? COLORS.gold : mb.differential < 0 ? COLORS.red : "#4ade80" }}>
+                    {mb.differential > 0 ? "+" : ""}{fmt$(mb.differential)}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
             <button onClick={cancelEdit} style={{
               fontSize: "11px", fontWeight: 600, color: COLORS.muted,
@@ -818,6 +910,24 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
         </div>
       )}
     </div>
+  );
+}
+
+// Small square badge showing which source drives the material cost: M (manual)
+// or P (from purchased paint).
+function SourceBadge({ source }) {
+  const isM = source === "M";
+  return (
+    <span
+      title={isM ? "Material cost = manual input" : "Material cost = calculated from paint purchased"}
+      style={{
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: "15px", height: "15px", borderRadius: "3px",
+        fontSize: "9px", fontWeight: 800, lineHeight: 1,
+        color: COLORS.charcoal,
+        background: isM ? COLORS.gold : "#4ade80",
+      }}
+    >{source}</span>
   );
 }
 
@@ -901,15 +1011,26 @@ export default function App() {
   // Materials import state
   const [matImport, setMatImport] = useState(null);
 
+  const unsubRef = useRef([]);
+
   useEffect(() => {
     loadHistory().then(h => { setHistory(h); setHistoryLoaded(true); });
-    loadTeamLeads().then(leads => { setTeamLeadList(leads); setTeamLead(leads[0]); });
+    loadTeamLeads(DEFAULT_TEAM_LEADS).then(leads => { setTeamLeadList(leads); setTeamLead(leads[0]); });
     loadPaintPrices().then(({ catalog, pkgMap }) => {
       if (catalog.length > 0) setPaintCatalog(catalog);
       if (Object.keys(pkgMap).length > 0) setPkgPaintMap(pkgMap);
     });
     loadCrewCapacity().then(setCrewCapacity);
     loadCustomPaints().then(setCustomPaints);
+
+    unsubRef.current = [
+      onHistoryChange(jobs => { setHistory(jobs); setHistoryLoaded(true); }),
+      onTeamLeadsChange(leads => setTeamLeadList(leads)),
+      onCrewCapacityChange(entries => setCrewCapacity(entries)),
+      onCustomPaintsChange(paints => setCustomPaints(paints)),
+    ];
+
+    return () => unsubRef.current.forEach(fn => fn());
   }, []);
 
   // ─── CALCULATIONS ──────────────────────────────────────────────────────────
@@ -996,21 +1117,29 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
   // ─── SAVE JOB ─────────────────────────────────────────────────────────────
 
   async function handleSave() {
+    const savedPaintItems = materialItems.filter(i => i.productId).map(i => ({
+      productId: i.productId,
+      qtyPurchased: i.qtyPurchased || i.qty || 0,
+      qtyUsed: i.qtyUsed || 0,
+      ...(i.productId === "__other__" ? { customName: i.customName || "", customPrice: i.customPrice || 0 } : {}),
+    }));
+    // The calculator's materialCost is the %-based budget; store it as the manual
+    // baseline so GP is unchanged, and capture the paint-derived breakdown too.
+    const mb = materialBreakdown(savedPaintItems, materialCost, fullPaintCatalog);
     const job = {
       id: Date.now(),
       date: new Date().toLocaleDateString("en-US"),
       dateCompleted,
       clientName, projectId, projectType, package: pkg,
       salesperson, pm, teamLead, revenue: rev, changeOrderRev: co,
-      laborBudget, laborPct, materialCost, materialPct: matPct,
+      laborBudget, laborPct,
+      materialCost: mb.effective, materialCostManual: materialCost,
+      materialFromPurchased: mb.fromPurchased, materialFromUsed: mb.fromUsed,
+      materialDifferential: mb.differential, materialSource: mb.source,
+      materialPct: matPct,
       gpDollar, gpPct, totalDays, crewSize: numGuys, manDays, totalManHours,
       crew: enrichedCrew.filter(m => m.name),
-      paintItems: materialItems.filter(i => i.productId).map(i => ({
-        productId: i.productId,
-        qtyPurchased: i.qtyPurchased || i.qty || 0,
-        qtyUsed: i.qtyUsed || 0,
-        ...(i.productId === "__other__" ? { customName: i.customName || "", customPrice: i.customPrice || 0 } : {}),
-      })),
+      paintItems: savedPaintItems,
     };
     const updated = [job, ...history];
     setHistory(updated);
