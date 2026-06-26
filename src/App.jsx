@@ -109,10 +109,24 @@ function mapSwProduct(desc, catalog, customPaints) {
   return null;
 }
 
+// Parse a US-style date string (M/D/YYYY or MM/DD/YYYY) to an ISO yyyy-mm-dd.
+// Returns "" if it can't be parsed.
+function swDateToIso(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/);
+  if (!m) return "";
+  let [, mo, d, y] = m;
+  if (y.length === 2) y = "20" + y;
+  const mm = String(mo).padStart(2, "0");
+  const dd = String(d).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
+
 function parseSwXlsx(data) {
   const workbook = XLSX.read(data, { type: "array" });
   const sheetName = workbook.SheetNames.find(n => n.toLowerCase().includes("project+product") || n.toLowerCase().includes("gallons by"));
-  if (!sheetName) return { items: [], error: "Could not find 'Gallons by Project+Product' sheet" };
+  if (!sheetName) return { items: [], poDates: {}, error: "Could not find 'Gallons by Project+Product' sheet" };
   const sheet = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
   const items = rows
@@ -124,7 +138,23 @@ function parseSwXlsx(data) {
       gallons: parseFloat(r["Gallons"]) || 0,
       spend: parseFloat(r["Spend"]) || 0,
     }));
-  return { items, error: null };
+
+  // Latest invoice date per PO (from the Invoice Index / Line Items sheet) so
+  // we can default each job's Date Completed to its last materials invoice.
+  const poDates = {};
+  const dateSheetName = workbook.SheetNames.find(n => n.toLowerCase().includes("invoice index"))
+    || workbook.SheetNames.find(n => n.toLowerCase().includes("line items"));
+  if (dateSheetName) {
+    const dRows = XLSX.utils.sheet_to_json(workbook.Sheets[dateSheetName], { defval: "" });
+    for (const r of dRows) {
+      const po = String(r["PO"] || r["PO / Project"] || "").trim();
+      const iso = swDateToIso(r["Date"]);
+      if (!po || !iso) continue;
+      if (!poDates[po] || iso > poDates[po]) poDates[po] = iso; // ISO strings sort lexically
+    }
+  }
+
+  return { items, poDates, error: null };
 }
 
 function parsePricesMd(text) {
@@ -528,7 +558,7 @@ const editLabelStyle = {
   marginBottom: "3px",
 };
 
-function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
+function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAddCustomPaint }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -541,6 +571,14 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
     ? job.materialCostManual
     : (job.materialCost ?? "");
   const viewMb = materialBreakdown(job.paintItems, viewManualRaw, paintCatalog);
+
+  // Flags for fields that are still $0 and likely need updating.
+  const needsFlags = [];
+  if ((job.revenue || 0) + (job.changeOrderRev || 0) === 0) needsFlags.push("R");
+  if ((job.laborBudget || 0) === 0) needsFlags.push("L");
+  if ((viewMb.effective || 0) === 0) needsFlags.push("M");
+
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   function startEdit(e) {
     e.stopPropagation();
@@ -560,12 +598,14 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
     });
     setEditing(true);
     setExpanded(true);
+    setConfirmDelete(false);
   }
 
   function cancelEdit(e) {
     e.stopPropagation();
     setDraft(null);
     setEditing(false);
+    setConfirmDelete(false);
   }
 
   function saveEdit(e) {
@@ -629,7 +669,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
         onClick={() => !editing && setExpanded(!expanded)}
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 90px 90px 90px 80px 28px 28px",
+          gridTemplateColumns: "1fr 82px 82px 82px 82px 64px 26px",
           gap: "8px",
           alignItems: "center",
           padding: "12px 16px",
@@ -638,13 +678,24 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
         }}
       >
         <div>
-          <div style={{ fontWeight: 600, fontSize: "14px", color: COLORS.offWhite }}>{job.clientName || "Unnamed Job"}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ fontWeight: 600, fontSize: "14px", color: COLORS.offWhite }}>{job.clientName || "Unnamed Job"}</span>
+            {needsFlags.map(f => (
+              <span key={f} title={`${f === "R" ? "Revenue" : f === "L" ? "Labor" : "Materials"} is $0 - needs updating`}
+                style={{
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  minWidth: "16px", height: "16px", padding: "0 3px", borderRadius: "3px",
+                  fontSize: "9px", fontWeight: 800, color: "#fff", background: COLORS.red,
+                }}>{f}</span>
+            ))}
+          </div>
           <div style={{ fontSize: "11px", color: COLORS.muted, marginTop: "2px" }}>
             {job.projectId ? `#${job.projectId} · ` : ""}{PROJECT_LABELS[job.projectType]} · {job.package} · {job.dateCompleted || job.date}
           </div>
         </div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.revenue + (job.changeOrderRev || 0))}</div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.laborBudget)}</div>
+        <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(viewMb.effective)}</div>
         <div style={{ textAlign: "right", fontSize: "13px", color: COLORS.offWhite }}>{fmt$(job.gpDollar)}</div>
         <div style={{
           textAlign: "center", fontSize: "11px", fontWeight: 700,
@@ -652,15 +703,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
         }}>
           {fmtPct(job.gpPct)}
         </div>
-        <button
-          onClick={startEdit}
-          title="Edit"
-          style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "13px" }}
-        >{editing ? "" : "✎"}</button>
-        <button
-          onClick={e => { e.stopPropagation(); onDelete(job.id); }}
-          style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "16px" }}
-        >×</button>
+        <span style={{ textAlign: "center", color: COLORS.muted, fontSize: "13px" }}>{expanded ? "▾" : "▸"}</span>
       </div>
 
       {expanded && !editing && (
@@ -747,6 +790,13 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
               })}
             </div>
           )}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "12px" }}>
+            <button onClick={startEdit} style={{
+              fontSize: "11px", fontWeight: 600, color: COLORS.goldLight,
+              background: COLORS.gold + "22", border: `1px solid ${COLORS.gold}44`,
+              borderRadius: "6px", padding: "6px 16px", cursor: "pointer",
+            }}>Edit</button>
+          </div>
         </div>
       )}
 
@@ -826,29 +876,58 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
           <div style={{ marginBottom: "12px" }}>
             <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>Paint Usage</div>
             {(draft.paintItems || []).map((pi, idx) => (
-              <div key={pi.id || idx} style={{
-                display: "grid", gridTemplateColumns: "1fr 70px 70px 28px",
-                gap: "6px", alignItems: "center", marginBottom: "6px",
-              }}>
-                <select style={editInputStyle} value={pi.productId || ""} onChange={e => {
-                  const items = draft.paintItems.map((p, i) => i === idx ? { ...p, productId: e.target.value } : p);
-                  updateDraft("paintItems", items);
+              <div key={pi.id || idx} style={{ marginBottom: "6px" }}>
+                <div style={{
+                  display: "grid", gridTemplateColumns: "1fr 70px 70px 28px",
+                  gap: "6px", alignItems: "center",
                 }}>
-                  <option value="">Select paint</option>
-                  {paintCatalog.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-                <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Bought"
-                  value={pi.qtyPurchased || ""} onChange={e => {
-                    const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyPurchased: parseFloat(e.target.value) || 0 } : p);
+                  <select style={editInputStyle} value={pi.productId || ""} onChange={e => {
+                    const items = draft.paintItems.map((p, i) => i === idx ? { ...p, productId: e.target.value } : p);
                     updateDraft("paintItems", items);
-                  }} />
-                <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Used"
-                  value={pi.qtyUsed || ""} onChange={e => {
-                    const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyUsed: parseFloat(e.target.value) || 0 } : p);
-                    updateDraft("paintItems", items);
-                  }} />
-                <button onClick={() => updateDraft("paintItems", draft.paintItems.filter((_, i) => i !== idx))}
-                  style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}>x</button>
+                  }}>
+                    <option value="">Select paint</option>
+                    {paintCatalog.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    <option value="__other__">Other (custom)</option>
+                  </select>
+                  <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Bought"
+                    value={pi.qtyPurchased || ""} onChange={e => {
+                      const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyPurchased: parseFloat(e.target.value) || 0 } : p);
+                      updateDraft("paintItems", items);
+                    }} />
+                  <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Used"
+                    value={pi.qtyUsed || ""} onChange={e => {
+                      const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyUsed: parseFloat(e.target.value) || 0 } : p);
+                      updateDraft("paintItems", items);
+                    }} />
+                  <button onClick={() => updateDraft("paintItems", draft.paintItems.filter((_, i) => i !== idx))}
+                    style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}>x</button>
+                </div>
+                {pi.productId === "__other__" && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 90px auto", gap: "6px", alignItems: "center", marginTop: "4px", paddingLeft: "2px" }}>
+                    <input style={{ ...editInputStyle, fontSize: "12px" }} type="text" placeholder="New material name"
+                      value={pi.customName || ""} onChange={e => {
+                        const items = draft.paintItems.map((p, i) => i === idx ? { ...p, customName: e.target.value } : p);
+                        updateDraft("paintItems", items);
+                      }} />
+                    <input style={{ ...editInputStyle, fontSize: "12px", textAlign: "center" }} type="number" min="0" step="any" placeholder="$/gal"
+                      value={pi.customPrice || ""} onChange={e => {
+                        const items = draft.paintItems.map((p, i) => i === idx ? { ...p, customPrice: parseFloat(e.target.value) || 0 } : p);
+                        updateDraft("paintItems", items);
+                      }} />
+                    <button
+                      onClick={() => {
+                        if (!pi.customName || !(pi.customPrice > 0)) return;
+                        const newId = onAddCustomPaint(pi.customName, pi.customPrice);
+                        const items = draft.paintItems.map((p, i) => i === idx ? { ...p, productId: newId } : p);
+                        updateDraft("paintItems", items);
+                      }}
+                      style={{
+                        fontSize: "11px", fontWeight: 600, color: COLORS.goldLight, whiteSpace: "nowrap",
+                        background: COLORS.gold + "22", border: `1px solid ${COLORS.gold}44`,
+                        borderRadius: "6px", padding: "6px 10px", cursor: "pointer",
+                      }}>+ Add to catalog</button>
+                  </div>
+                )}
               </div>
             ))}
             <button onClick={() => updateDraft("paintItems", [...(draft.paintItems || []), { id: Date.now(), productId: "", qtyPurchased: 0, qtyUsed: 0 }])}
@@ -895,17 +974,40 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList }) {
             );
           })()}
 
-          <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-            <button onClick={cancelEdit} style={{
-              fontSize: "11px", fontWeight: 600, color: COLORS.muted,
-              background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
-              borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
-            }}>Cancel</button>
-            <button onClick={saveEdit} style={{
-              fontSize: "11px", fontWeight: 600, color: COLORS.charcoal,
-              background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
-              border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
-            }}>Save Changes</button>
+          <div style={{ display: "flex", gap: "8px", justifyContent: "space-between", alignItems: "center" }}>
+            {!confirmDelete ? (
+              <button onClick={() => setConfirmDelete(true)} style={{
+                fontSize: "11px", fontWeight: 600, color: COLORS.red,
+                background: "rgba(239,68,68,0.1)", border: `1px solid ${COLORS.red}44`,
+                borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+              }}>Delete</button>
+            ) : (
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <span style={{ fontSize: "11px", color: COLORS.red, fontWeight: 600 }}>Delete this job permanently?</span>
+                <button onClick={e => { e.stopPropagation(); onDelete(job.id); }} style={{
+                  fontSize: "11px", fontWeight: 700, color: "#fff",
+                  background: COLORS.red, border: "none",
+                  borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+                }}>Yes, delete</button>
+                <button onClick={() => setConfirmDelete(false)} style={{
+                  fontSize: "11px", fontWeight: 600, color: COLORS.muted,
+                  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+                }}>Keep it</button>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button onClick={cancelEdit} style={{
+                fontSize: "11px", fontWeight: 600, color: COLORS.muted,
+                background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+              }}>Cancel</button>
+              <button onClick={saveEdit} style={{
+                fontSize: "11px", fontWeight: 600, color: COLORS.charcoal,
+                background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
+                border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer",
+              }}>Save Changes</button>
+            </div>
           </div>
         </div>
       )}
@@ -1158,6 +1260,17 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
     const updated = history.map(j => j.id === updatedJob.id ? updatedJob : j);
     setHistory(updated);
     await saveHistory(updated);
+  }
+
+  // Adds a new material to the shared catalog (used from the history editor).
+  // Returns the new product id so the caller can select it immediately.
+  function addCustomPaint(name, price) {
+    const id = "custom-" + Date.now();
+    const product = { id, name, unit: "gal", price: parseNum(price) };
+    const updated = [...customPaints, product];
+    setCustomPaints(updated);
+    saveCustomPaints(updated);
+    return id;
   }
 
   function handleImportCsv(e) {
@@ -2207,7 +2320,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     const reader = new FileReader();
                     reader.onload = evt => {
                       const data = new Uint8Array(evt.target.result);
-                      const { items, error } = parseSwXlsx(data);
+                      const { items, poDates, error } = parseSwXlsx(data);
                       if (error) { setImportMsg(error); return; }
 
                       const grouped = {};
@@ -2229,6 +2342,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                           isNumeric: isNumericPO(po),
                           matchedJob,
                           products: mappedProducts,
+                          invoiceDate: poDates[po] || "",
                           totalGallons: products.reduce((s, p) => s + p.gallons, 0),
                           totalSpend: products.reduce((s, p) => s + p.spend, 0),
                         };
@@ -2310,6 +2424,11 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                           </div>
                           <span style={{ fontSize: "12px", color: COLORS.muted }}>{m.totalGallons} gal | {fmt$(m.totalSpend)}</span>
                         </div>
+                        {m.invoiceDate && (
+                          <div style={{ fontSize: "10px", color: COLORS.muted, marginLeft: "12px", marginBottom: "4px" }}>
+                            Last invoice {m.invoiceDate}{!m.matchedJob.dateCompleted ? " - will set as Date Completed" : " - Date Completed already set, keeping it"}
+                          </div>
+                        )}
                         {m.products.map((p, i) => (
                           <div key={i} style={{ fontSize: "11px", color: COLORS.offWhite, marginLeft: "12px", marginBottom: "2px" }}>
                             {p.catalogId ? (
@@ -2413,7 +2532,21 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                           };
                         });
 
-                        return { ...job, paintItems };
+                        // Recompute the material breakdown against the new paint
+                        // items (catalog incl. the customs queued in this import).
+                        const catalogForCalc = [...paintCatalog, ...customPaints, ...newCustom];
+                        const manualRaw = job.materialCostManual !== undefined && job.materialCostManual !== null
+                          ? job.materialCostManual : (job.materialCost ?? "");
+                        const mb = materialBreakdown(paintItems, manualRaw, catalogForCalc);
+                        return {
+                          ...job,
+                          paintItems,
+                          // Default Date Completed to the last invoice date, only if not already set.
+                          dateCompleted: job.dateCompleted || match.invoiceDate || "",
+                          materialFromPurchased: mb.fromPurchased,
+                          materialFromUsed: mb.fromUsed,
+                          materialDifferential: mb.differential,
+                        };
                       });
 
                       if (newCustom.length > 0) {
@@ -2513,12 +2646,12 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             {/* Column headers */}
             <div style={{
               display: "grid",
-              gridTemplateColumns: "1fr 90px 90px 90px 80px 28px 28px",
+              gridTemplateColumns: "1fr 82px 82px 82px 82px 64px 26px",
               gap: "8px",
               padding: "0 16px 8px",
             }}>
-              {["Client", "Revenue", "Labor", "Est. GP", "GP %", "", ""].map((h, i) => (
-                <div key={h + i} style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Client" ? "left" : "right" }}>{h}</div>
+              {["Client", "Revenue", "Labor", "Materials", "Est. GP", "GP %", ""].map((h, i) => (
+                <div key={h + i} style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Client" ? "left" : h === "" ? "center" : "right" }}>{h}</div>
               ))}
             </div>
 
@@ -2529,7 +2662,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             )}
 
             {filteredHistory.map(job => (
-              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={fullPaintCatalog} teamLeadList={teamLeadList} />
+              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={fullPaintCatalog} teamLeadList={teamLeadList} onAddCustomPaint={addCustomPaint} />
             ))}
           </>
           );
