@@ -284,8 +284,24 @@ function materialBreakdown(paintItems, manualRaw, catalog) {
 // ─── STORAGE (Firestore - see firebase.js) ──────────────────────────────────
 
 const CAPACITY_STATUSES = ["available", "on-job", "unavailable"];
-const CAPACITY_LABELS = { available: "Available", "on-job": "On Job", unavailable: "Unavailable" };
+// "available" = free capacity we could deploy; "on-job" = working one of our jobs
+// (utilized); "unavailable" = not available to us (off or on another job).
+const CAPACITY_LABELS = { available: "Available", "on-job": "On Our Job", unavailable: "Unavailable" };
 const CAPACITY_COLORS = { available: "#22c55e", "on-job": "#C8972A", unavailable: "#6b7280" };
+
+// Count status-days across a set of leads x days. Returns person-day tallies plus
+// derived capacity/utilization. Capacity available to us = available + on-job;
+// utilization = share of that capacity actually on our jobs.
+function capacityStats(leads, days, crewCapacity) {
+  const counts = { available: 0, "on-job": 0, unavailable: 0 };
+  leads.forEach(lead => days.forEach(d => {
+    const s = crewCapacity[`${lead}|${d}`] || "available";
+    counts[s] = (counts[s] || 0) + 1;
+  }));
+  const capacity = counts.available + counts["on-job"];
+  const utilPct = capacity > 0 ? counts["on-job"] / capacity : 0;
+  return { ...counts, capacity, utilPct };
+}
 
 function getWeekDates(weekOffset) {
   const now = new Date();
@@ -2161,23 +2177,26 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 </div>
 
                 {weeks.map(week => {
-                  const weekAvailCount = leads.reduce((sum, lead) => {
-                    const availDays = week.days.filter(d => (crewCapacity[`${lead}|${d}`] || "available") === "available").length;
-                    return sum + availDays;
-                  }, 0);
-                  const totalSlots = leads.length * week.days.length;
-                  const weekCapPct = totalSlots > 0 ? weekAvailCount / totalSlots : 0;
-                  const capColor = weekCapPct >= 0.5 ? COLORS.green : weekCapPct >= 0.25 ? COLORS.yellow : COLORS.red;
+                  const stats = capacityStats(leads, week.days, crewCapacity);
+                  const utilColor = stats.utilPct >= 0.7 ? COLORS.green : stats.utilPct >= 0.4 ? COLORS.yellow : COLORS.red;
 
                   return (
                     <div key={week.offset} style={{ marginBottom: "20px" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
                         <div style={{ fontWeight: 600, fontSize: "12px", color: COLORS.offWhite }}>{week.label}</div>
-                        <div style={{
-                          fontSize: "11px", fontWeight: 700, color: capColor,
-                          background: capColor + "22", borderRadius: "6px", padding: "3px 8px",
-                        }}>
-                          {(weekCapPct * 100).toFixed(0)}% Available
+                        <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                          <div style={{
+                            fontSize: "11px", fontWeight: 700, color: utilColor,
+                            background: utilColor + "22", borderRadius: "6px", padding: "3px 8px",
+                          }}>
+                            {(stats.utilPct * 100).toFixed(0)}% utilized
+                          </div>
+                          <div style={{
+                            fontSize: "11px", fontWeight: 600, color: COLORS.green,
+                            background: COLORS.green + "18", borderRadius: "6px", padding: "3px 8px",
+                          }} title="Available capacity not yet on a job (person-days)">
+                            {stats.available} open
+                          </div>
                         </div>
                       </div>
 
@@ -2253,24 +2272,24 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px" }}>
                   {weeks.map(week => {
-                    const dayAvails = week.days.map(d => {
-                      const avail = leads.filter(l => (crewCapacity[`${l}|${d}`] || "available") === "available").length;
-                      return avail;
-                    });
-                    const avgAvail = dayAvails.reduce((s, v) => s + v, 0) / dayAvails.length;
-                    const onJob = leads.filter(l =>
-                      week.days.some(d => (crewCapacity[`${l}|${d}`] || "available") === "on-job")
-                    ).length;
-
+                    const stats = capacityStats(leads, week.days, crewCapacity);
+                    const utilColor = stats.utilPct >= 0.7 ? COLORS.green : stats.utilPct >= 0.4 ? COLORS.yellow : COLORS.red;
                     return (
                       <div key={week.offset} style={{ textAlign: "center", padding: "10px", background: "rgba(255,255,255,0.03)", borderRadius: "8px" }}>
                         <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", marginBottom: "6px" }}>{week.label}</div>
-                        <div style={{ fontSize: "20px", fontWeight: 700, color: COLORS.goldLight }}>{avgAvail.toFixed(1)}</div>
-                        <div style={{ fontSize: "10px", color: COLORS.muted }}>avg leads/day</div>
-                        <div style={{ fontSize: "11px", color: COLORS.gold, marginTop: "4px" }}>{onJob} on jobs</div>
+                        <div style={{ fontSize: "22px", fontWeight: 700, color: utilColor }}>{(stats.utilPct * 100).toFixed(0)}%</div>
+                        <div style={{ fontSize: "10px", color: COLORS.muted }}>capacity utilized</div>
+                        <div style={{ fontSize: "11px", color: COLORS.offWhite, marginTop: "6px", lineHeight: 1.5 }}>
+                          <div><span style={{ color: COLORS.gold, fontWeight: 600 }}>{stats["on-job"]}</span> on our jobs</div>
+                          <div><span style={{ color: COLORS.green, fontWeight: 600 }}>{stats.available}</span> open capacity</div>
+                          <div><span style={{ color: COLORS.muted, fontWeight: 600 }}>{stats.unavailable}</span> unavailable</div>
+                        </div>
                       </div>
                     );
                   })}
+                </div>
+                <div style={{ fontSize: "10px", color: COLORS.muted, marginTop: "10px", fontStyle: "italic" }}>
+                  Utilization = on our jobs / (on our jobs + open capacity). Counts are person-days across the week. "Open capacity" is availability we could still deploy.
                 </div>
               </div>
             </>
