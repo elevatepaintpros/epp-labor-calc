@@ -36,6 +36,10 @@ const GP_TARGETS = {
   "Com Int": 0.30, "Com Ext": 0.30,
 };
 
+// Hard GP floor: anything below this is red (no bonus). Bonuses are based on
+// clearing this 40% floor, so it applies regardless of the per-type target.
+const GP_FLOOR = 0.40;
+
 const PACKAGES = ["Standard", "Gold", "Platinum", "N/A"];
 const MAT_PCT = { Standard: 0.15, Gold: 0.15, Platinum: 0.18, "N/A": 0.15 };
 
@@ -237,15 +241,15 @@ function parseNum(s) {
 }
 
 function gpColor(gp, target) {
-  if (gp >= target - 0.01) return COLORS.green;
-  if (gp >= target - 0.06) return COLORS.yellow;
-  return COLORS.red;
+  if (gp < GP_FLOOR) return COLORS.red;          // below the 40% bonus floor
+  if (gp >= target - 0.01) return COLORS.green;  // at/above the project target
+  return COLORS.yellow;                           // above floor, below target
 }
 
 function gpLabel(gp, target) {
+  if (gp < GP_FLOOR) return "BELOW FLOOR";
   if (gp >= target - 0.01) return "ON TARGET";
-  if (gp >= target - 0.06) return "WATCH";
-  return "BELOW TARGET";
+  return "ABOVE FLOOR";
 }
 
 // Unit price for a paint item, resolving custom ("Other") and catalog products.
@@ -1101,6 +1105,7 @@ export default function App() {
   const [changeOrder, setChangeOrder] = useState("");
   const [targetLaborPct, setTargetLaborPct] = useState(35);
   const [materialPctOverride, setMaterialPctOverride] = useState("");
+  const [clientProvidesPaint, setClientProvidesPaint] = useState(false);
   const [crew, setCrew] = useState([{ id: 1, name: "", level: "Painter 2", days: 0 }]);
   const [crewSize, setCrewSize] = useState("");
   const [materialItems, setMaterialItems] = useState([]);
@@ -1160,7 +1165,7 @@ export default function App() {
   const rev = parseNum(revenue);
   const co = parseNum(changeOrder);
   const totalRev = rev + co;
-  const matPct = materialPctOverride !== "" ? parseNum(materialPctOverride) / 100 : MAT_PCT[pkg];
+  const matPct = clientProvidesPaint ? 0 : (materialPctOverride !== "" ? parseNum(materialPctOverride) / 100 : MAT_PCT[pkg]);
   const materialCost = totalRev * matPct;
   const laborBudget = totalRev * (targetLaborPct / 100);
   const gpTarget = GP_TARGETS[projectType] || 0.5;
@@ -1254,7 +1259,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
       materialCost: mb.effective, materialCostManual: materialCost,
       materialFromPurchased: mb.fromPurchased, materialFromUsed: mb.fromUsed,
       materialDifferential: mb.differential, materialSource: mb.source,
-      materialPct: matPct,
+      materialPct: matPct, clientProvidesPaint,
       gpDollar, gpPct, totalDays, crewSize: numGuys, manDays, totalManHours,
       crew: enrichedCrew.filter(m => m.name),
       paintItems: savedPaintItems,
@@ -1552,47 +1557,71 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               {/* Material target - % and $ inputs */}
               <div style={{ marginTop: "16px" }}>
                 <label style={labelStyle}>Materials Budget <span style={{ color: COLORS.muted, fontWeight: 400 }}>(default: {(MAT_PCT[pkg] * 100).toFixed(0)}%)</span></label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <input
-                      style={{ ...inputStyle, flex: 1 }}
-                      type="number" min="5" max="25" step="any"
-                      value={materialPctOverride}
-                      onChange={e => setMaterialPctOverride(e.target.value)}
-                      placeholder={(MAT_PCT[pkg] * 100).toFixed(0)}
-                    />
-                    <span style={{ fontSize: "14px", color: COLORS.muted, whiteSpace: "nowrap" }}>%</span>
+
+                <label style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "12px", color: COLORS.offWhite, marginBottom: "10px" }}>
+                  <input
+                    type="checkbox"
+                    checked={clientProvidesPaint}
+                    onChange={e => { setClientProvidesPaint(e.target.checked); setMatDollarEdit(null); }}
+                    style={{ accentColor: COLORS.gold }}
+                  />
+                  Client provides paint (materials 0%)
+                </label>
+
+                {clientProvidesPaint ? (
+                  <div style={{
+                    fontSize: "12px", color: COLORS.goldLight, lineHeight: 1.5,
+                    background: "rgba(200,151,42,0.08)", border: `1px solid ${COLORS.gold}33`,
+                    borderRadius: "8px", padding: "10px 12px",
+                  }}>
+                    Materials budget is <strong>0%</strong> because the client is providing paint.
+                    That freed-up budget can go to labor, so you can raise the labor % above the usual target.
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span style={{ fontSize: "14px", color: COLORS.muted, whiteSpace: "nowrap" }}>$</span>
+                ) : (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <input
+                          style={{ ...inputStyle, flex: 1 }}
+                          type="number" min="5" max="25" step="any"
+                          value={materialPctOverride}
+                          onChange={e => setMaterialPctOverride(e.target.value)}
+                          placeholder={(MAT_PCT[pkg] * 100).toFixed(0)}
+                        />
+                        <span style={{ fontSize: "14px", color: COLORS.muted, whiteSpace: "nowrap" }}>%</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ fontSize: "14px", color: COLORS.muted, whiteSpace: "nowrap" }}>$</span>
+                        <input
+                          style={{ ...inputStyle, flex: 1 }}
+                          type="number" min="0" step="25"
+                          value={matDollarEdit !== null ? matDollarEdit : (totalRev > 0 ? materialCost.toFixed(2) : "")}
+                          placeholder="0"
+                          onFocus={e => setMatDollarEdit(e.target.value)}
+                          onChange={e => setMatDollarEdit(e.target.value)}
+                          onBlur={() => {
+                            const dollars = parseFloat(matDollarEdit) || 0;
+                            if (totalRev > 0) {
+                              const pct = (dollars / totalRev) * 100;
+                              setMaterialPctOverride(String(pct));
+                            }
+                            setMatDollarEdit(null);
+                          }}
+                        />
+                      </div>
+                    </div>
                     <input
-                      style={{ ...inputStyle, flex: 1 }}
-                      type="number" min="0" step="25"
-                      value={matDollarEdit !== null ? matDollarEdit : (totalRev > 0 ? materialCost.toFixed(2) : "")}
-                      placeholder="0"
-                      onFocus={e => setMatDollarEdit(e.target.value)}
-                      onChange={e => setMatDollarEdit(e.target.value)}
-                      onBlur={() => {
-                        const dollars = parseFloat(matDollarEdit) || 0;
-                        if (totalRev > 0) {
-                          const pct = (dollars / totalRev) * 100;
-                          setMaterialPctOverride(String(pct));
-                        }
-                        setMatDollarEdit(null);
-                      }}
+                      className="epp-slider"
+                      type="range" min="5" max="25" step="0.5"
+                      value={materialPctOverride !== "" ? materialPctOverride : MAT_PCT[pkg] * 100}
+                      onChange={e => { setMaterialPctOverride(e.target.value); setMatDollarEdit(null); }}
+                      style={{ width: "100%", marginTop: "8px" }}
                     />
-                  </div>
-                </div>
-                <input
-                  className="epp-slider"
-                  type="range" min="5" max="25" step="0.5"
-                  value={materialPctOverride !== "" ? materialPctOverride : MAT_PCT[pkg] * 100}
-                  onChange={e => { setMaterialPctOverride(e.target.value); setMatDollarEdit(null); }}
-                  style={{ width: "100%", marginTop: "8px" }}
-                />
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: COLORS.muted, marginTop: "2px" }}>
-                  <span>5%</span><span>25%</span>
-                </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: COLORS.muted, marginTop: "2px" }}>
+                      <span>5%</span><span>25%</span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
@@ -1898,7 +1927,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     </div>
                   </div>
                   <div style={{ fontSize: "11px", color: COLORS.muted, marginTop: "8px" }}>
-                    GP target for {PROJECT_LABELS[projectType]}: {fmtPct(gpTarget)} · Labor target: {targetLaborPct}% · Materials: {fmtPct(matPct)}
+                    GP target for {PROJECT_LABELS[projectType]}: {fmtPct(gpTarget)} · <span style={{ color: gpPct < GP_FLOOR ? COLORS.red : COLORS.muted }}>Floor: {fmtPct(GP_FLOOR)} (bonus)</span> · Labor target: {targetLaborPct}% · Materials: {fmtPct(matPct)}
                   </div>
               </div>
             )}
