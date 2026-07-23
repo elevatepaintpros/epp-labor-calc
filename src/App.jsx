@@ -266,6 +266,11 @@ function paintItemUnitPrice(item, catalog) {
 // Effective cost is what feeds GP. Differential = purchased - used (leftover $).
 function materialBreakdown(paintItems, manualRaw, catalog) {
   const items = paintItems || [];
+  const galEstimated = items.reduce((s, pi) => s + (pi.qtyEstimated || 0), 0);
+  const galPurchased = items.reduce((s, pi) => s + (pi.qtyPurchased || pi.qty || 0), 0);
+  const galUsed = items.reduce((s, pi) => s + (pi.qtyUsed || 0), 0);
+  const fromEstimated = items.reduce(
+    (s, pi) => s + paintItemUnitPrice(pi, catalog) * (pi.qtyEstimated || 0), 0);
   const fromPurchased = items.reduce(
     (s, pi) => s + paintItemUnitPrice(pi, catalog) * (pi.qtyPurchased || pi.qty || 0), 0);
   const fromUsed = items.reduce(
@@ -275,6 +280,10 @@ function materialBreakdown(paintItems, manualRaw, catalog) {
   const manual = hasManual ? n : null;
   const effective = hasManual ? manual : fromPurchased;
   return {
+    galEstimated,
+    galPurchased,
+    galUsed,
+    fromEstimated,
     fromPurchased,
     fromUsed,
     manual,
@@ -639,6 +648,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
     const md = guys * days;
     const cleanItems = (draft.paintItems || []).filter(pi => pi.productId).map(pi => ({
       productId: pi.productId,
+      qtyEstimated: pi.qtyEstimated || 0,
       qtyPurchased: pi.qtyPurchased || 0,
       qtyUsed: pi.qtyUsed || 0,
       ...(pi.productId === "__other__" ? { customName: pi.customName || "", customPrice: pi.customPrice || 0 } : {}),
@@ -794,20 +804,48 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
           )}
           {job.paintItems && job.paintItems.length > 0 && (
             <div style={{ marginTop: "12px" }}>
-              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>Paint Usage</div>
+              <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>Paint Quantities (gal)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 48px 56px 48px 1.1fr", gap: "6px", marginBottom: "4px" }}>
+                {["Product", "Est", "Bought", "Used", "Est vs Used"].map((h, i) => (
+                  <div key={i} style={{ fontSize: "9px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Product" ? "left" : h === "Est vs Used" ? "left" : "center" }}>{h}</div>
+                ))}
+              </div>
               {job.paintItems.map((pi, i) => {
-                const over = (pi.qtyPurchased || 0) - (pi.qtyUsed || 0);
+                const est = pi.qtyEstimated || 0;
+                const bought = pi.qtyPurchased || 0;
+                const used = pi.qtyUsed || 0;
                 const pName = pi.productId === "__other__" ? (pi.customName || "Other") : (paintCatalog.find(p => p.id === pi.productId)?.name || pi.productId);
+                // "Where we're wrong": how far actual usage was from the estimate.
+                const estDelta = used - est;
+                const showEstDelta = est > 0 && used > 0;
                 return (
-                  <div key={i} style={{ fontSize: "12px", color: COLORS.offWhite, marginBottom: "3px" }}>
-                    {pName} · {pi.qtyPurchased || 0} bought · {pi.qtyUsed || 0} used
-                    {pi.qtyUsed > 0 && <span style={{
-                      fontWeight: 600, marginLeft: "6px",
-                      color: over > 0 ? COLORS.gold : over < 0 ? COLORS.red : "#4ade80",
-                    }}>({over > 0 ? "+" : ""}{over} {over > 0 ? "over" : over < 0 ? "short" : "exact"})</span>}
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 48px 56px 48px 1.1fr", gap: "6px", fontSize: "12px", color: COLORS.offWhite, marginBottom: "3px", alignItems: "center" }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={pName}>{pName}</div>
+                    <div style={{ textAlign: "center", color: COLORS.muted }}>{est || "-"}</div>
+                    <div style={{ textAlign: "center" }}>{bought || "-"}</div>
+                    <div style={{ textAlign: "center" }}>{used || "-"}</div>
+                    <div style={{ fontSize: "11px", fontWeight: 600, color: !showEstDelta ? COLORS.muted : estDelta > 0 ? COLORS.red : estDelta < 0 ? COLORS.gold : "#4ade80" }}>
+                      {showEstDelta ? `${estDelta > 0 ? "+" : ""}${estDelta} ${estDelta > 0 ? "over est" : estDelta < 0 ? "under est" : "on est"}` : "--"}
+                    </div>
                   </div>
                 );
               })}
+              {(() => {
+                const t = { est: 0, bought: 0, used: 0 };
+                job.paintItems.forEach(pi => { t.est += pi.qtyEstimated || 0; t.bought += pi.qtyPurchased || 0; t.used += pi.qtyUsed || 0; });
+                const estDelta = t.used - t.est;
+                return (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 48px 56px 48px 1.1fr", gap: "6px", fontSize: "12px", fontWeight: 700, color: COLORS.offWhite, marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.08)", alignItems: "center" }}>
+                    <div style={{ color: COLORS.muted, fontWeight: 600 }}>Total</div>
+                    <div style={{ textAlign: "center", color: COLORS.muted }}>{t.est || "-"}</div>
+                    <div style={{ textAlign: "center" }}>{t.bought || "-"}</div>
+                    <div style={{ textAlign: "center" }}>{t.used || "-"}</div>
+                    <div style={{ fontSize: "11px", color: t.est > 0 && t.used > 0 ? (estDelta > 0 ? COLORS.red : estDelta < 0 ? COLORS.gold : "#4ade80") : COLORS.muted }}>
+                      {t.est > 0 && t.used > 0 ? `${estDelta > 0 ? "+" : ""}${estDelta} vs est` : "--"}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "12px" }}>
@@ -894,11 +932,18 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
 
           {/* Paint Items */}
           <div style={{ marginBottom: "12px" }}>
-            <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>Paint Usage</div>
+            <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>Paint Quantities (gal)</div>
+            {(draft.paintItems || []).length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 60px 60px 60px 28px", gap: "6px", marginBottom: "4px", padding: "0 2px" }}>
+                {["Product", "Est", "Bought", "Used", ""].map((h, i) => (
+                  <div key={i} style={{ fontSize: "9px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", textAlign: h === "Product" ? "left" : "center" }}>{h}</div>
+                ))}
+              </div>
+            )}
             {(draft.paintItems || []).map((pi, idx) => (
               <div key={pi.id || idx} style={{ marginBottom: "6px" }}>
                 <div style={{
-                  display: "grid", gridTemplateColumns: "1fr 70px 70px 28px",
+                  display: "grid", gridTemplateColumns: "1fr 60px 60px 60px 28px",
                   gap: "6px", alignItems: "center",
                 }}>
                   <select style={editInputStyle} value={pi.productId || ""} onChange={e => {
@@ -909,6 +954,11 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
                     {paintCatalog.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     <option value="__other__">Other (custom)</option>
                   </select>
+                  <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Est"
+                    value={pi.qtyEstimated || ""} onChange={e => {
+                      const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyEstimated: parseFloat(e.target.value) || 0 } : p);
+                      updateDraft("paintItems", items);
+                    }} />
                   <input style={{ ...editInputStyle, textAlign: "center" }} type="number" min="0" placeholder="Bought"
                     value={pi.qtyPurchased || ""} onChange={e => {
                       const items = draft.paintItems.map((p, i) => i === idx ? { ...p, qtyPurchased: parseFloat(e.target.value) || 0 } : p);
@@ -950,7 +1000,7 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
                 )}
               </div>
             ))}
-            <button onClick={() => updateDraft("paintItems", [...(draft.paintItems || []), { id: Date.now(), productId: "", qtyPurchased: 0, qtyUsed: 0 }])}
+            <button onClick={() => updateDraft("paintItems", [...(draft.paintItems || []), { id: Date.now(), productId: "", qtyEstimated: 0, qtyPurchased: 0, qtyUsed: 0 }])}
               style={{
                 background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.15)",
                 borderRadius: "6px", color: COLORS.muted, padding: "6px", width: "100%",
