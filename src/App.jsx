@@ -348,6 +348,20 @@ function getDateLabel(dateStr) {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+// Human "time ago" for an ISO timestamp, plus staleness after ~4 days.
+function relativeTime(iso) {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const mins = Math.floor((Date.now() - then) / 60000);
+  let label;
+  if (mins < 1) label = "just now";
+  else if (mins < 60) label = `${mins} min${mins === 1 ? "" : "s"} ago`;
+  else if (mins < 1440) { const h = Math.floor(mins / 60); label = `${h} hour${h === 1 ? "" : "s"} ago`; }
+  else { const d = Math.floor(mins / 1440); label = `${d} day${d === 1 ? "" : "s"} ago`; }
+  return { label, stale: mins >= 4 * 1440, exact: new Date(iso).toLocaleString("en-US") };
+}
+
 // ─── CSV EXPORT / IMPORT ────────────────────────────────────────────────────
 
 const CSV_COLUMNS = [
@@ -1172,6 +1186,7 @@ export default function App() {
 
   // Crew capacity
   const [crewCapacity, setCrewCapacity] = useState({});
+  const [crewUpdatedAt, setCrewUpdatedAt] = useState(null);
   const [capacityWeekOffset, setCapacityWeekOffset] = useState(-2);
 
   // History
@@ -1193,13 +1208,13 @@ export default function App() {
       if (catalog.length > 0) setPaintCatalog(catalog);
       if (Object.keys(pkgMap).length > 0) setPkgPaintMap(pkgMap);
     });
-    loadCrewCapacity().then(setCrewCapacity);
+    loadCrewCapacity().then(({ entries, updatedAt }) => { setCrewCapacity(entries); setCrewUpdatedAt(updatedAt); });
     loadCustomPaints().then(setCustomPaints);
 
     unsubRef.current = [
       onHistoryChange(jobs => { setHistory(jobs); setHistoryLoaded(true); }),
       onTeamLeadsChange(leads => setTeamLeadList(leads)),
-      onCrewCapacityChange(entries => setCrewCapacity(entries)),
+      onCrewCapacityChange(({ entries, updatedAt }) => { setCrewCapacity(entries); setCrewUpdatedAt(updatedAt); }),
       onCustomPaintsChange(paints => setCustomPaints(paints)),
     ];
 
@@ -2216,7 +2231,8 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             const nextIdx = (CAPACITY_STATUSES.indexOf(current) + 1) % CAPACITY_STATUSES.length;
             const updated = { ...crewCapacity, [key]: CAPACITY_STATUSES[nextIdx] };
             setCrewCapacity(updated);
-            saveCrewCapacity(updated);
+            setCrewUpdatedAt(new Date().toISOString()); // optimistic; save confirms
+            saveCrewCapacity(updated).then(ts => { if (ts) setCrewUpdatedAt(ts); });
           }
 
           return (
@@ -2253,6 +2269,23 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   <div style={{ marginLeft: "auto", color: COLORS.muted, fontStyle: "italic" }}>
                     Click a cell to cycle status
                   </div>
+                </div>
+
+                {/* Last-edited indicator so the team can tell if the board is current */}
+                <div style={{ marginBottom: "16px", fontSize: "11px", display: "flex", alignItems: "center", gap: "6px" }}>
+                  {(() => {
+                    const upd = relativeTime(crewUpdatedAt);
+                    if (!upd) {
+                      return <span style={{ color: COLORS.muted }}>Last updated: not recorded yet — toggle any cell to start tracking</span>;
+                    }
+                    const c = upd.stale ? COLORS.red : COLORS.green;
+                    return (
+                      <span style={{ color: c, fontWeight: 600 }} title={`Exact: ${upd.exact}`}>
+                        <span style={{ display: "inline-block", width: "8px", height: "8px", borderRadius: "50%", background: c, marginRight: "6px" }} />
+                        Last updated {upd.label}{upd.stale ? " · may be out of date" : ""}
+                      </span>
+                    );
+                  })()}
                 </div>
 
                 {weeks.map(week => {

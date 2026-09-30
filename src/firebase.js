@@ -49,6 +49,15 @@ async function saveDoc(ref, field, value) {
   }
 }
 
+// Merge several fields into a doc in one write.
+async function saveDocMerge(ref, obj) {
+  try {
+    await setDoc(ref, obj, { merge: true });
+  } catch (e) {
+    console.warn("Firestore write failed:", e);
+  }
+}
+
 // Generic loader: cloud value wins; first-run (doc absent) migrates local up;
 // read error returns local for DISPLAY ONLY and never writes back to the cloud.
 async function loadWithFallback(ref, field, localKey, empty, isEmpty) {
@@ -95,24 +104,33 @@ export async function saveTeamLeads(leads) {
   } catch { /* local cache fallback */ }
 }
 
+// Returns { entries, updatedAt } — updatedAt is an ISO string of the last edit,
+// or null if the record predates timestamp tracking or was read from local cache.
 export async function loadCrewCapacity() {
   try {
-    const fb = await loadDocStrict(DOCS.crewCapacity, "entries");
-    if (fb !== undefined) return fb;
+    const snap = await getDoc(DOCS.crewCapacity);
+    if (snap.exists() && snap.data().entries != null) {
+      return { entries: snap.data().entries, updatedAt: snap.data().updatedAt || null };
+    }
+    // doc absent: first-run migrate from local cache
     const local = await readLocalAsync("epp_crew_capacity", {});
     if (local && Object.keys(local).length > 0) await saveDoc(DOCS.crewCapacity, "entries", local);
-    return local;
+    return { entries: local, updatedAt: null };
   } catch (e) {
     console.warn("Firestore read failed for crew capacity; using local cache (display only):", e);
-    return await readLocalAsync("epp_crew_capacity", {});
+    return { entries: await readLocalAsync("epp_crew_capacity", {}), updatedAt: null };
   }
 }
 
+// Writes entries plus a fresh updatedAt timestamp. Returns the timestamp so the
+// caller can reflect it immediately without waiting for the snapshot listener.
 export async function saveCrewCapacity(data) {
-  await saveDoc(DOCS.crewCapacity, "entries", data);
+  const updatedAt = new Date().toISOString();
+  await saveDocMerge(DOCS.crewCapacity, { entries: data, updatedAt });
   try {
     await window.storage.set("epp_crew_capacity", JSON.stringify(data));
   } catch { /* local cache fallback */ }
+  return updatedAt;
 }
 
 export async function loadCustomPaints() {
@@ -145,7 +163,7 @@ export function onTeamLeadsChange(callback) {
 export function onCrewCapacityChange(callback) {
   return onSnapshot(DOCS.crewCapacity, (snap) => {
     if (snap.exists() && snap.data().entries) {
-      callback(snap.data().entries);
+      callback({ entries: snap.data().entries, updatedAt: snap.data().updatedAt || null });
     }
   });
 }
