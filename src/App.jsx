@@ -273,6 +273,58 @@ function gpLabel(gp, target) {
   return "ABOVE FLOOR";
 }
 
+// Job-costing decision tree: for a job below the 40% GP floor, point to the
+// likely cause. Uses the materials/labor split to pick the branch, and the
+// estimated/bought/used paint variance to name the specific materials cause.
+function diagnoseJob(job) {
+  const rev = (job.revenue || 0) + (job.changeOrderRev || 0);
+  const gpPct = job.gpPct || 0;
+  if (rev <= 0 || gpPct >= GP_FLOOR) return [];
+
+  const matPct = job.materialPct || 0;
+  const laborPct = job.laborPct || 0;
+  const items = job.paintItems || [];
+  const r = (n) => Math.round(n * 10) / 10;
+  const est = items.reduce((s, p) => s + (p.qtyEstimated || 0), 0);
+  const bought = items.reduce((s, p) => s + (p.qtyPurchased || 0), 0);
+  const used = items.reduce((s, p) => s + (p.qtyUsed || 0), 0);
+  const findings = [];
+
+  if (matPct > 0.15) {
+    const causes = [];
+    if (used > 0 && bought - used > 0.5) causes.push(`Over-ordered: bought ${r(bought)} gal, used ${r(used)} (${r(bought - used)} left over) — Production / Sales`);
+    if (est > 0 && used - est > 0.5) causes.push(`Overapplied or wasted: used ${r(used)} gal vs ${r(est)} estimated — Painter`);
+    if (est > 0 && est - used > 0.5 && bought - used <= 0.5) causes.push(`Estimate ran high — less used than planned (Production / Sales estimate)`);
+    if (causes.length === 0) causes.push(
+      "Overapplied or wasted paint — Painter",
+      "Over-ordered paint — Production",
+      "Underestimated paint or missed prep in the bid — Sales",
+    );
+    findings.push({ area: "Materials high", note: `${fmtPct(matPct)} of revenue (target 15%)`, causes });
+  }
+
+  if (laborPct > 0.40) {
+    findings.push({
+      area: "Labor high",
+      note: `${fmtPct(laborPct)} of revenue (floor 40%)`,
+      causes: [
+        "Slow painter or incorrect process — Painter",
+        "Crew over-staffed or scheduling inefficiency — Production",
+        "Undersold the project or underestimated prep in the bid — Sales",
+      ],
+    });
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      area: "Pricing / revenue",
+      note: `GP ${fmtPct(gpPct)} is below 40% but materials and labor are each within target`,
+      causes: ["Underpriced or undersold the job — Sales", "Revenue not fully captured — check change orders"],
+    });
+  }
+  return findings;
+}
+
 // Unit price for a paint item, resolving custom ("Other") and catalog products.
 function paintItemUnitPrice(item, catalog) {
   if (!item) return 0;
@@ -843,6 +895,35 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
               </div>
             ))}
           </div>
+
+          {/* Low-GP diagnosis (job-costing decision tree) */}
+          {(() => {
+            const findings = diagnoseJob(job);
+            if (findings.length === 0) return null;
+            return (
+              <div style={{
+                marginBottom: "12px", padding: "12px 14px",
+                background: "rgba(239,68,68,0.07)", borderRadius: "8px",
+                border: `1px solid ${COLORS.red}33`,
+              }}>
+                <div style={{ fontSize: "10px", color: COLORS.red, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px", fontWeight: 700 }}>
+                  GP below 40% floor — likely causes
+                </div>
+                {findings.map((f, i) => (
+                  <div key={i} style={{ marginBottom: i < findings.length - 1 ? "10px" : 0 }}>
+                    <div style={{ fontSize: "12px", fontWeight: 700, color: COLORS.offWhite }}>
+                      {f.area} <span style={{ fontWeight: 400, color: COLORS.muted }}>· {f.note}</span>
+                    </div>
+                    <ul style={{ margin: "4px 0 0", paddingLeft: "18px" }}>
+                      {f.causes.map((c, j) => (
+                        <li key={j} style={{ fontSize: "12px", color: COLORS.offWhite, marginBottom: "2px", lineHeight: 1.4 }}>{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
 
           {/* Materials cost breakdown */}
           <div style={{
