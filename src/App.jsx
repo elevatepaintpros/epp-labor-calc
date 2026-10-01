@@ -5,8 +5,11 @@ import {
   loadTeamLeads, saveTeamLeads,
   loadCrewCapacity, saveCrewCapacity,
   loadCustomPaints, saveCustomPaints,
+  loadCommissionSettings, saveCommissionSettings,
+  loadCallbacks, saveCallbacks,
   onHistoryChange, onTeamLeadsChange,
   onCrewCapacityChange, onCustomPaintsChange,
+  onCommissionSettingsChange, onCallbacksChange,
 } from "./firebase.js";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -44,7 +47,25 @@ const PACKAGES = ["Standard", "Gold", "Platinum", "N/A"];
 const MAT_PCT = { Standard: 0.15, Gold: 0.15, Platinum: 0.18, "N/A": 0.15 };
 
 const SALESPERSON_LIST = ["Greg", "Doug"];
-const PM_LIST = ["Z", "Greg"];
+const PM_LIST = ["Brandon", "Greg"];
+
+// Everyone who can be credited for a sale, PM job, or upsell.
+const ALL_PEOPLE = [...new Set([...PM_LIST, ...SALESPERSON_LIST])];
+
+// Commission rules. All rates are editable in the Commissions tab (stored in the
+// cloud); these are the defaults. PM commission = pmCommissionPct of the GP
+// dollars ABOVE the gpFloorPct line (0 when GP% is at/below the floor).
+const DEFAULT_COMMISSION_SETTINGS = {
+  salesCommissionPct: 8,     // % of job revenue to the salesperson
+  pmCommissionPct: 10,       // % of GP$ above the floor to the PM
+  gpFloorPct: 40,            // GP% floor above which PM commission is earned
+  fiveStarBonus: 50,         // $ per 5-star review, credited to the job's PM
+  upsellBonusPct: 3,         // % of upsell $ to whoever upsold
+  pms: [
+    { name: "Brandon", baseSalary: 0 },
+    { name: "Greg", baseSalary: 0 },
+  ],
+};
 const DEFAULT_TEAM_LEADS = [
   "Abel Favela", "Zach Howick", "David Hernandez (Precision Drywall)",
   "Fernando Blancarte (Blancarte Painting)", "Ricky Aguilar (Saias Painting)",
@@ -292,6 +313,53 @@ function materialBreakdown(paintItems, manualRaw, catalog) {
     source: hasManual ? "M" : "P",
     differential: fromPurchased - fromUsed,
   };
+}
+
+// Compute per-person commission payouts from a set of jobs + settings.
+// - PM GP commission = pmCommissionPct of GP$ ABOVE the gpFloorPct line (0 at/below floor).
+// - PM 5-star bonus = fiveStarBonus per 5-star job they managed.
+// - Sales commission = salesCommissionPct of job revenue to the salesperson.
+// - Upsell commission = upsellBonusPct of the upsell $ to whoever upsold.
+// `paidTotal` tracks the portion from jobs the client has paid (collectible now).
+function computeCommissions(jobs, settings) {
+  const s = settings || DEFAULT_COMMISSION_SETTINGS;
+  const floor = (s.gpFloorPct ?? 40) / 100;
+  const people = {};
+  const ensure = (name) => {
+    if (!name) return null;
+    if (!people[name]) {
+      people[name] = { name, gpComm: 0, fiveStar: 0, salesComm: 0, upsellComm: 0, baseSalary: 0, total: 0, paidTotal: 0 };
+    }
+    return people[name];
+  };
+  // Seed configured PMs so they always appear, with their base salary.
+  (s.pms || []).forEach(pm => { const p = ensure(pm.name); if (p) p.baseSalary = pm.baseSalary || 0; });
+
+  const credit = (name, field, amount, isPaid) => {
+    if (!name || !(amount > 0)) return;
+    const p = ensure(name);
+    p[field] += amount;
+    p.total += amount;
+    if (isPaid) p.paidTotal += amount;
+  };
+
+  for (const j of jobs) {
+    const totalRev = (j.revenue || 0) + (j.changeOrderRev || 0);
+    const gpDollar = j.gpDollar || 0;
+    const isPaid = !!j.paid;
+    if (j.pm) {
+      const overFloor = Math.max(0, gpDollar - floor * totalRev);
+      credit(j.pm, "gpComm", overFloor * (s.pmCommissionPct || 0) / 100, isPaid);
+      if (j.fiveStar) credit(j.pm, "fiveStar", s.fiveStarBonus || 0, isPaid);
+    }
+    if (j.salesperson) {
+      credit(j.salesperson, "salesComm", (j.revenue || 0) * (s.salesCommissionPct || 0) / 100, isPaid);
+    }
+    if (j.upsellBy && j.upsellAmount) {
+      credit(j.upsellBy, "upsellComm", (j.upsellAmount || 0) * (s.upsellBonusPct || 0) / 100, isPaid);
+    }
+  }
+  return Object.values(people).sort((a, b) => b.total - a.total);
 }
 
 // ─── STORAGE (Firestore - see firebase.js) ──────────────────────────────────
@@ -692,6 +760,10 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
       totalManHours: md * 8,
       changeOrderRev: co,
       paintItems: cleanItems,
+      upsellAmount: parseNum(draft.upsellAmount) || 0,
+      upsellBy: draft.upsellBy || "",
+      fiveStar: !!draft.fiveStar,
+      paid: !!draft.paid,
     };
     onUpdate(updated);
     setDraft(null);
@@ -761,6 +833,9 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
               ["Man-Days", (job.manDays || 0) + " man-days"],
               ["Labor Budget", fmt$(job.laborBudget) + " (" + fmtPct(job.laborPct) + ")"],
               ["GP Target", fmtPct(target)],
+              ["5-Star", job.fiveStar ? "Yes" : "No"],
+              ["Client Paid", job.paid ? "Yes" : "No"],
+              ["Upsell", job.upsellAmount ? fmt$(job.upsellAmount) + (job.upsellBy ? " (" + job.upsellBy + ")" : "") : "--"],
             ].map(([label, val]) => (
               <div key={label}>
                 <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
@@ -941,6 +1016,34 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
             <div>
               <div style={editLabelStyle}>Total Days</div>
               <input style={editInputStyle} type="number" value={draft.totalDays || 0} onChange={e => updateDraft("totalDays", e.target.value)} />
+            </div>
+          </div>
+
+          {/* Commissions & status */}
+          <div style={{ marginBottom: "12px" }}>
+            <div style={{ fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>Commissions &amp; Status</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", alignItems: "end" }}>
+              <div>
+                <div style={editLabelStyle}>Upsell $</div>
+                <input style={editInputStyle} type="number" min="0" value={draft.upsellAmount || ""} onChange={e => updateDraft("upsellAmount", e.target.value)} placeholder="0" />
+              </div>
+              <div>
+                <div style={editLabelStyle}>Upsold by</div>
+                <select style={editInputStyle} value={draft.upsellBy || ""} onChange={e => updateDraft("upsellBy", e.target.value)}>
+                  <option value="">--</option>
+                  {ALL_PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: "14px", paddingBottom: "8px" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "12px", color: COLORS.offWhite }}>
+                  <input type="checkbox" checked={!!draft.fiveStar} onChange={e => updateDraft("fiveStar", e.target.checked)} style={{ accentColor: COLORS.gold }} />
+                  5-star
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "12px", color: COLORS.offWhite }}>
+                  <input type="checkbox" checked={!!draft.paid} onChange={e => updateDraft("paid", e.target.checked)} style={{ accentColor: COLORS.gold }} />
+                  Client paid
+                </label>
+              </div>
             </div>
           </div>
 
@@ -1160,7 +1263,7 @@ export default function App() {
   const [projectType, setProjectType] = useState("Res Int");
   const [pkg, setPkg] = useState("Gold");
   const [salesperson, setSalesperson] = useState("Greg");
-  const [pm, setPm] = useState("Z");
+  const [pm, setPm] = useState("Brandon");
   const [teamLead, setTeamLead] = useState(DEFAULT_TEAM_LEADS[0]);
   const [teamLeadList, setTeamLeadList] = useState(DEFAULT_TEAM_LEADS);
   const [editingLeads, setEditingLeads] = useState(false);
@@ -1196,8 +1299,16 @@ export default function App() {
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
 
+  // Commission period filter
+  const [commFrom, setCommFrom] = useState("");
+  const [commTo, setCommTo] = useState("");
+
   // Materials import state
   const [matImport, setMatImport] = useState(null);
+
+  // Commissions + callbacks
+  const [commissionSettings, setCommissionSettings] = useState(DEFAULT_COMMISSION_SETTINGS);
+  const [callbacks, setCallbacks] = useState([]);
 
   const unsubRef = useRef([]);
 
@@ -1210,16 +1321,29 @@ export default function App() {
     });
     loadCrewCapacity().then(({ entries, updatedAt }) => { setCrewCapacity(entries); setCrewUpdatedAt(updatedAt); });
     loadCustomPaints().then(setCustomPaints);
+    loadCommissionSettings(DEFAULT_COMMISSION_SETTINGS).then(setCommissionSettings);
+    loadCallbacks().then(setCallbacks);
 
     unsubRef.current = [
       onHistoryChange(jobs => { setHistory(jobs); setHistoryLoaded(true); }),
       onTeamLeadsChange(leads => setTeamLeadList(leads)),
       onCrewCapacityChange(({ entries, updatedAt }) => { setCrewCapacity(entries); setCrewUpdatedAt(updatedAt); }),
       onCustomPaintsChange(paints => setCustomPaints(paints)),
+      onCommissionSettingsChange(setCommissionSettings),
+      onCallbacksChange(setCallbacks),
     ];
 
     return () => unsubRef.current.forEach(fn => fn());
   }, []);
+
+  function updateCommissionSettings(next) {
+    setCommissionSettings(next);
+    saveCommissionSettings(next);
+  }
+  function updateCallbacks(next) {
+    setCallbacks(next);
+    saveCallbacks(next);
+  }
 
   // ─── CALCULATIONS ──────────────────────────────────────────────────────────
 
@@ -1429,7 +1553,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
           </div>
         </div>
         <div style={{ display: "flex", gap: "6px" }}>
-          {["calc", "crew", "history"].map(t => (
+          {["calc", "crew", "history", "comm", "callbacks"].map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -1447,7 +1571,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                 transition: "all 0.15s",
               }}
             >
-              {t === "calc" ? "Calculator" : t === "crew" ? "Crew" : `History (${history.length})`}
+              {t === "calc" ? "Calculator" : t === "crew" ? "Crew" : t === "history" ? `History (${history.length})` : t === "comm" ? "Commissions" : "Callbacks"}
             </button>
           ))}
         </div>
@@ -2796,6 +2920,143 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
               <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={fullPaintCatalog} teamLeadList={teamLeadList} onAddCustomPaint={addCustomPaint} />
             ))}
           </>
+          );
+        })()}
+
+        {/* ── COMMISSIONS TAB ── */}
+        {tab === "comm" && (() => {
+          const s = commissionSettings || DEFAULT_COMMISSION_SETTINGS;
+          const toIso = (d) => {
+            if (!d) return "";
+            if (String(d).includes("-")) return d;
+            const p = new Date(d); return isNaN(p.getTime()) ? "" : p.toISOString().slice(0, 10);
+          };
+          const periodJobs = history.filter(j => {
+            const iso = toIso(j.dateCompleted || j.date);
+            if (commFrom && iso < commFrom) return false;
+            if (commTo && iso > commTo) return false;
+            return true;
+          });
+          const payouts = computeCommissions(periodJobs, s);
+          const setNum = (field, val) => updateCommissionSettings({ ...s, [field]: parseNum(val) });
+          const setPmField = (idx, val) => {
+            const pms = (s.pms || []).map((p, i) => i === idx ? { ...p, baseSalary: parseNum(val) } : p);
+            updateCommissionSettings({ ...s, pms });
+          };
+          const settingBox = (label, field, suffix) => (
+            <div>
+              <div style={editLabelStyle}>{label}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <input style={{ ...inputStyle, flex: 1 }} type="number" min="0" step="any" value={s[field] ?? ""} onChange={e => setNum(field, e.target.value)} />
+                <span style={{ fontSize: "11px", color: COLORS.muted, whiteSpace: "nowrap" }}>{suffix}</span>
+              </div>
+            </div>
+          );
+          const cols = "1fr 90px 70px 90px 80px 92px 92px";
+          return (
+            <>
+              <div style={cardStyle}>
+                <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: "14px" }}>Commission Settings</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "12px", marginBottom: "16px" }}>
+                  {settingBox("Sales commission", "salesCommissionPct", "% of rev")}
+                  {settingBox("PM commission", "pmCommissionPct", "% GP>floor")}
+                  {settingBox("GP floor", "gpFloorPct", "%")}
+                  {settingBox("5-star bonus", "fiveStarBonus", "$ each")}
+                  {settingBox("Upsell bonus", "upsellBonusPct", "% upsell")}
+                </div>
+                <div style={{ fontSize: "11px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>PM Base Salaries (annual)</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "12px" }}>
+                  {(s.pms || []).map((pm, idx) => (
+                    <div key={pm.name} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <span style={{ fontSize: "13px", color: COLORS.offWhite, width: "80px" }}>{pm.name}</span>
+                      <span style={{ color: COLORS.muted }}>$</span>
+                      <input style={{ ...inputStyle, flex: 1 }} type="number" min="0" value={pm.baseSalary || ""} onChange={e => setPmField(idx, e.target.value)} placeholder="0" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={cardStyle}>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "11px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Pay period</span>
+                  <input style={inputStyle} type="date" value={commFrom} onChange={e => setCommFrom(e.target.value)} />
+                  <span style={{ color: COLORS.muted }}>to</span>
+                  <input style={inputStyle} type="date" value={commTo} onChange={e => setCommTo(e.target.value)} />
+                  {(commFrom || commTo) && (
+                    <button onClick={() => { setCommFrom(""); setCommTo(""); }} style={{ fontSize: "11px", color: COLORS.muted, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "6px", padding: "6px 10px", cursor: "pointer" }}>Clear</button>
+                  )}
+                  <span style={{ fontSize: "12px", color: COLORS.muted, marginLeft: "auto" }}>{periodJobs.length} job{periodJobs.length === 1 ? "" : "s"}{(!commFrom && !commTo) ? " (all time)" : " in range"}</span>
+                </div>
+              </div>
+
+              <div style={cardStyle}>
+                <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: "14px" }}>Payouts</div>
+                {payouts.length === 0 ? (
+                  <div style={{ color: COLORS.muted, fontSize: "13px" }}>No commissions in this period.</div>
+                ) : (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: cols, gap: "8px", padding: "0 4px 8px", fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      <div>Person</div><div style={{ textAlign: "right" }}>GP comm</div><div style={{ textAlign: "right" }}>5-star</div><div style={{ textAlign: "right" }}>Sales</div><div style={{ textAlign: "right" }}>Upsell</div><div style={{ textAlign: "right" }}>Total</div><div style={{ textAlign: "right" }}>Collectible</div>
+                    </div>
+                    {payouts.map(p => (
+                      <div key={p.name} style={{ display: "grid", gridTemplateColumns: cols, gap: "8px", padding: "8px 4px", borderTop: "1px solid rgba(255,255,255,0.06)", alignItems: "center", fontSize: "13px", color: COLORS.offWhite }}>
+                        <div>
+                          <div style={{ fontWeight: 600 }}>{p.name}</div>
+                          {p.baseSalary > 0 && <div style={{ fontSize: "10px", color: COLORS.muted }}>base {fmt$(p.baseSalary)}/yr</div>}
+                        </div>
+                        <div style={{ textAlign: "right" }}>{fmt$(p.gpComm)}</div>
+                        <div style={{ textAlign: "right" }}>{fmt$(p.fiveStar)}</div>
+                        <div style={{ textAlign: "right" }}>{fmt$(p.salesComm)}</div>
+                        <div style={{ textAlign: "right" }}>{fmt$(p.upsellComm)}</div>
+                        <div style={{ textAlign: "right", fontWeight: 700, color: COLORS.goldLight }}>{fmt$(p.total)}</div>
+                        <div style={{ textAlign: "right", color: p.paidTotal > 0 ? COLORS.green : COLORS.muted }} title="From jobs the client has paid">{fmt$(p.paidTotal)}</div>
+                      </div>
+                    ))}
+                  </>
+                )}
+                <div style={{ fontSize: "10px", color: COLORS.muted, marginTop: "12px", fontStyle: "italic", lineHeight: 1.5 }}>
+                  PM commission = {s.pmCommissionPct}% of GP$ above the {s.gpFloorPct}% floor (0 at or below). Sales = {s.salesCommissionPct}% of revenue. 5-star = {fmt$(s.fiveStarBonus)} each (to the job's PM). Upsell = {s.upsellBonusPct}% of the upsell, to whoever upsold. "Collectible" is the portion from jobs marked client-paid. Base salary is annual, shown for reference and not added to the period total.
+                </div>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* ── CALLBACKS TAB ── */}
+        {tab === "callbacks" && (() => {
+          const addRow = () => updateCallbacks([{ id: Date.now(), clientName: "", reason: "", hoursToComplete: "", serviceDate: "", callbackRequired: true, technician: "" }, ...callbacks]);
+          const setRow = (id, field, val) => updateCallbacks(callbacks.map(c => c.id === id ? { ...c, [field]: val } : c));
+          const delRow = (id) => { if (window.confirm("Delete this callback entry? This cannot be undone.")) updateCallbacks(callbacks.filter(c => c.id !== id)); };
+          const cols = "1.2fr 1.7fr 56px 130px 80px 1fr 28px";
+          return (
+            <div style={cardStyle}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+                <div style={{ fontWeight: 700, fontSize: "13px", color: COLORS.gold, letterSpacing: "0.05em", textTransform: "uppercase" }}>Callbacks / Issues ({callbacks.length})</div>
+                <button onClick={addRow} style={{ fontSize: "11px", fontWeight: 600, color: COLORS.charcoal, background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`, border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer" }}>+ Add callback</button>
+              </div>
+              {callbacks.length === 0 ? (
+                <div style={{ color: COLORS.muted, fontSize: "13px" }}>No callbacks logged yet. Click "Add callback" to log one.</div>
+              ) : (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: cols, gap: "6px", padding: "0 2px 6px", fontSize: "10px", color: COLORS.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    <div>Client</div><div>Reason for call back</div><div style={{ textAlign: "center" }}>Hrs</div><div>Service date</div><div style={{ textAlign: "center" }}>Callback?</div><div>Technician</div><div></div>
+                  </div>
+                  {callbacks.map(c => (
+                    <div key={c.id} style={{ display: "grid", gridTemplateColumns: cols, gap: "6px", marginBottom: "6px", alignItems: "center" }}>
+                      <input style={{ ...inputStyle, fontSize: "12px" }} value={c.clientName || ""} onChange={e => setRow(c.id, "clientName", e.target.value)} placeholder="Client" />
+                      <input style={{ ...inputStyle, fontSize: "12px" }} value={c.reason || ""} onChange={e => setRow(c.id, "reason", e.target.value)} placeholder="Reason" />
+                      <input style={{ ...inputStyle, fontSize: "12px", textAlign: "center" }} type="number" min="0" value={c.hoursToComplete || ""} onChange={e => setRow(c.id, "hoursToComplete", e.target.value)} />
+                      <input style={{ ...inputStyle, fontSize: "12px" }} type="date" value={c.serviceDate || ""} onChange={e => setRow(c.id, "serviceDate", e.target.value)} />
+                      <label style={{ display: "flex", justifyContent: "center" }}>
+                        <input type="checkbox" checked={!!c.callbackRequired} onChange={e => setRow(c.id, "callbackRequired", e.target.checked)} style={{ accentColor: COLORS.gold }} />
+                      </label>
+                      <input style={{ ...inputStyle, fontSize: "12px" }} value={c.technician || ""} onChange={e => setRow(c.id, "technician", e.target.value)} placeholder="Technician" />
+                      <button onClick={() => delRow(c.id)} title="Delete" style={{ background: "none", border: "none", color: COLORS.muted, cursor: "pointer", fontSize: "14px" }}>x</button>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
           );
         })()}
       </div>

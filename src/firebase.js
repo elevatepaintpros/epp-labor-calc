@@ -18,6 +18,8 @@ const DOCS = {
   teamLeads: doc(db, "data", "team_leads"),
   crewCapacity: doc(db, "data", "crew_capacity"),
   customPaints: doc(db, "data", "custom_paints"),
+  commissionSettings: doc(db, "data", "commission_settings"),
+  callbacks: doc(db, "data", "callbacks"),
 };
 
 // Reads a field from a Firestore doc.
@@ -174,4 +176,53 @@ export function onCustomPaintsChange(callback) {
       callback(snap.data().paints);
     }
   });
+}
+
+// ─── COMMISSION SETTINGS ─────────────────────────────────────────────────────
+// Returns the settings object, or `defaults` when none are stored yet.
+export async function loadCommissionSettings(defaults) {
+  try {
+    const fb = await loadDocStrict(DOCS.commissionSettings, "settings");
+    if (fb !== undefined) return fb;
+    return defaults;
+  } catch (e) {
+    console.warn("Firestore read failed for commission settings:", e);
+    return defaults;
+  }
+}
+
+export async function saveCommissionSettings(settings) {
+  await saveDoc(DOCS.commissionSettings, "settings", settings);
+}
+
+export function onCommissionSettingsChange(callback) {
+  return onSnapshot(DOCS.commissionSettings, (snap) => {
+    if (snap.exists() && snap.data().settings) {
+      callback(snap.data().settings);
+    }
+  }, (e) => console.warn("commission settings listener:", e.code || e.message));
+}
+
+// ─── CALLBACKS / ISSUES LOG ──────────────────────────────────────────────────
+export async function loadCallbacks() {
+  try {
+    const fb = await loadDocStrict(DOCS.callbacks, "items");
+    if (fb !== undefined) return fb;
+    return [];
+  } catch (e) {
+    console.warn("Firestore read failed for callbacks:", e);
+    return [];
+  }
+}
+
+export async function saveCallbacks(items) {
+  await saveDoc(DOCS.callbacks, "items", items);
+}
+
+export function onCallbacksChange(callback) {
+  return onSnapshot(DOCS.callbacks, (snap) => {
+    if (snap.exists() && snap.data().items) {
+      callback(snap.data().items);
+    }
+  }, (e) => console.warn("callbacks listener:", e.code || e.message));
 }
