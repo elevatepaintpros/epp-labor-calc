@@ -456,6 +456,10 @@ const CAPACITY_LABELS = { unknown: "Unknown", available: "Available", "on-job": 
 const CAPACITY_COLORS = { unknown: "#475569", available: "#22c55e", "on-job": "#C8972A", unavailable: "#6b7280" };
 const CAPACITY_LETTERS = { unknown: "?", available: "A", "on-job": "J", unavailable: "X" };
 
+// Average revenue produced per crew per on-the-job day, used only for the rough
+// weekly projection on the crew board. It is an assumption; actual revenue varies.
+const CREW_DAY_REVENUE = 1500;
+
 // Count status-days across a set of leads x days. Returns person-day tallies plus
 // derived capacity/utilization. Capacity available to us = available + on-job
 // (unknown and unavailable are excluded); utilization = share of that capacity on our jobs.
@@ -514,6 +518,33 @@ function relativeTime(iso) {
   else if (mins < 1440) { const h = Math.floor(mins / 60); label = `${h} hour${h === 1 ? "" : "s"} ago`; }
   else { const d = Math.floor(mins / 1440); label = `${d} day${d === 1 ? "" : "s"} ago`; }
   return { label, stale: mins >= 4 * 1440, exact: new Date(iso).toLocaleString("en-US") };
+}
+
+// Local yyyy-mm-dd (no timezone shift) for a Date.
+function localIso(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Quick-filter date ranges for the history sheet. offsetWeeks/offsetMonths of 0
+// = current, -1 = previous. Weeks run Monday..Sunday.
+function weekRange(offsetWeeks) {
+  const now = new Date();
+  const mondayOffset = (now.getDay() + 6) % 7; // days since Monday
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - mondayOffset + offsetWeeks * 7);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return { from: localIso(monday), to: localIso(sunday) };
+}
+function monthRange(offsetMonths) {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth() + offsetMonths, 1);
+  const last = new Date(now.getFullYear(), now.getMonth() + offsetMonths + 1, 0);
+  return { from: localIso(first), to: localIso(last) };
+}
+function mtdRange() {
+  const now = new Date();
+  return { from: localIso(new Date(now.getFullYear(), now.getMonth(), 1)), to: localIso(now) };
 }
 
 // ─── CSV EXPORT / IMPORT ────────────────────────────────────────────────────
@@ -2579,6 +2610,12 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                           }} title="Available capacity not yet on a job (person-days)">
                             {stats.available} open
                           </div>
+                          <div style={{
+                            fontSize: "11px", fontWeight: 700, color: COLORS.goldLight,
+                            background: COLORS.gold + "22", borderRadius: "6px", padding: "3px 8px",
+                          }} title={`Projected revenue: ${stats["on-job"]} on-job crew-days x $${CREW_DAY_REVENUE.toLocaleString()}/crew/day (average assumption; actual will vary)`}>
+                            ~${(stats["on-job"] * CREW_DAY_REVENUE).toLocaleString()} proj
+                          </div>
                         </div>
                       </div>
 
@@ -2667,12 +2704,17 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                           <div><span style={{ color: COLORS.muted, fontWeight: 600 }}>{stats.unavailable}</span> unavailable</div>
                           {stats.unknown > 0 && <div><span style={{ color: "#64748b", fontWeight: 600 }}>{stats.unknown}</span> unknown</div>}
                         </div>
+                        <div style={{ marginTop: "8px", paddingTop: "8px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                          <div style={{ fontSize: "15px", fontWeight: 700, color: COLORS.goldLight }}>~${(stats["on-job"] * CREW_DAY_REVENUE).toLocaleString()}</div>
+                          <div style={{ fontSize: "10px", color: COLORS.muted }}>projected revenue</div>
+                        </div>
                       </div>
                     );
                   })}
                 </div>
-                <div style={{ fontSize: "10px", color: COLORS.muted, marginTop: "10px", fontStyle: "italic" }}>
+                <div style={{ fontSize: "10px", color: COLORS.muted, marginTop: "10px", fontStyle: "italic", lineHeight: 1.5 }}>
                   Utilization = on our jobs / (on our jobs + open capacity). Counts are person-days across the week. "Open capacity" is availability we could still deploy.
+                  Projected revenue assumes an average of ${CREW_DAY_REVENUE.toLocaleString()} per crew per on-the-job day. It is an average/assumption only; actual revenue will vary.
                 </div>
               </div>
             </>
@@ -2997,6 +3039,26 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                     onChange={e => setFilterTo(e.target.value)}
                     style={{ ...editInputStyle, width: "140px", padding: "4px 8px" }}
                   />
+                </div>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                  {[
+                    ["This week", weekRange(0)],
+                    ["Last week", weekRange(-1)],
+                    ["This month", monthRange(0)],
+                    ["Last month", monthRange(-1)],
+                    ["MTD", mtdRange()],
+                  ].map(([label, r]) => {
+                    const active = filterFrom === r.from && filterTo === r.to;
+                    return (
+                      <button key={label} onClick={() => { setFilterFrom(r.from); setFilterTo(r.to); }} style={{
+                        fontSize: "11px", fontWeight: 600,
+                        color: active ? COLORS.charcoal : COLORS.muted,
+                        background: active ? COLORS.gold : "rgba(255,255,255,0.06)",
+                        border: `1px solid ${active ? COLORS.gold : "rgba(255,255,255,0.12)"}`,
+                        borderRadius: "6px", padding: "4px 10px", cursor: "pointer",
+                      }}>{label}</button>
+                    );
+                  })}
                 </div>
                 {isFiltered && (
                   <button onClick={() => { setFilterFrom(""); setFilterTo(""); }} style={{
