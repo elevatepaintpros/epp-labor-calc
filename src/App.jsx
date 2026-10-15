@@ -273,13 +273,23 @@ function gpLabel(gp, target) {
   return "ABOVE FLOOR";
 }
 
-// Job-costing decision tree: for a job below the 40% GP floor, point to the
-// likely cause. Uses the materials/labor split to pick the branch, and the
-// estimated/bought/used paint variance to name the specific materials cause.
-function diagnoseJob(job) {
+const TIER_RANK = { Standard: 1, Gold: 2, Platinum: 3 };
+
+// Job-costing decision tree. Returns { level, findings }:
+//  - level "floor" (red): GP below the 40% floor.
+//  - level "target" (yellow): above the floor but below the project's GP target.
+//  - level null: no issue.
+// Uses the materials/labor split to pick the branch, the estimated/bought/used
+// paint variance to name the specific materials cause, the catalog to spot a
+// higher-tier paint than the package bid, and callbacks to flag rework.
+function diagnoseJob(job, target, catalog, callbacks) {
   const rev = (job.revenue || 0) + (job.changeOrderRev || 0);
   const gpPct = job.gpPct || 0;
-  if (rev <= 0 || gpPct >= GP_FLOOR) return [];
+  if (rev <= 0) return { level: null, findings: [] };
+  const belowFloor = gpPct < GP_FLOOR;
+  const belowTarget = target != null && gpPct < target - 0.01;
+  if (!belowFloor && !belowTarget) return { level: null, findings: [] };
+  const level = belowFloor ? "floor" : "target";
 
   const matPct = job.materialPct || 0;
   const laborPct = job.laborPct || 0;
@@ -290,16 +300,35 @@ function diagnoseJob(job) {
   const used = items.reduce((s, p) => s + (p.qtyUsed || 0), 0);
   const findings = [];
 
+  // Rework / callback logged for this client.
+  const client = (job.clientName || "").trim().toLowerCase();
+  if (client && (callbacks || []).some(c => (c.clientName || "").trim().toLowerCase() === client)) {
+    findings.push({
+      area: "Rework / callback",
+      note: "a callback is logged for this client",
+      causes: ["Rework adds labor and materials after the job is costed — make sure the callback's hours and materials are captured (Painter / Production)"],
+    });
+  }
+
   if (matPct > 0.15) {
     const causes = [];
     if (used > 0 && bought - used > 0.5) causes.push(`Over-ordered: bought ${r(bought)} gal, used ${r(used)} (${r(bought - used)} left over) — Production / Sales`);
     if (est > 0 && used - est > 0.5) causes.push(`Overapplied or wasted: used ${r(used)} gal vs ${r(est)} estimated — Painter`);
     if (est > 0 && est - used > 0.5 && bought - used <= 0.5) causes.push(`Estimate ran high — less used than planned (Production / Sales estimate)`);
+    // Higher-tier paint than the package was bid for.
+    const pkgRank = TIER_RANK[job.package] || 0;
+    if (pkgRank && catalog) {
+      const higher = items
+        .map(p => catalog.find(c => c.id === p.productId))
+        .filter(p => p && (TIER_RANK[p.tier] || 0) > pkgRank);
+      if (higher.length) causes.push(`Higher-tier paint than the ${job.package} bid: ${[...new Set(higher.map(h => h.name))].join(", ")} — check the bid matched the product (Sales / Production)`);
+    }
     if (causes.length === 0) causes.push(
       "Overapplied or wasted paint — Painter",
       "Over-ordered paint — Production",
       "Underestimated paint or missed prep in the bid — Sales",
     );
+    causes.push("Material prices may have risen since the bid — confirm the price catalog is current");
     findings.push({ area: "Materials high", note: `${fmtPct(matPct)} of revenue (target 15%)`, causes });
   }
 
@@ -318,11 +347,13 @@ function diagnoseJob(job) {
   if (findings.length === 0) {
     findings.push({
       area: "Pricing / revenue",
-      note: `GP ${fmtPct(gpPct)} is below 40% but materials and labor are each within target`,
+      note: belowFloor
+        ? `GP ${fmtPct(gpPct)} below 40% but materials and labor are each within target`
+        : `GP ${fmtPct(gpPct)} is below the ${fmtPct(target)} target`,
       causes: ["Underpriced or undersold the job — Sales", "Revenue not fully captured — check change orders"],
     });
   }
-  return findings;
+  return { level, findings };
 }
 
 // Unit price for a paint item, resolving custom ("Other") and catalog products.
@@ -416,19 +447,22 @@ function computeCommissions(jobs, settings) {
 
 // ─── STORAGE (Firestore - see firebase.js) ──────────────────────────────────
 
-const CAPACITY_STATUSES = ["available", "on-job", "unavailable"];
-// "available" = free capacity we could deploy; "on-job" = working one of our jobs
-// (utilized); "unavailable" = not available to us (off or on another job).
-const CAPACITY_LABELS = { available: "Available", "on-job": "On Our Job", unavailable: "Unavailable" };
-const CAPACITY_COLORS = { available: "#22c55e", "on-job": "#C8972A", unavailable: "#6b7280" };
+// "unknown" = not set yet (the default); "available" = free capacity we could
+// deploy; "on-job" = working one of our jobs (utilized); "unavailable" = not
+// available to us (off or on another job).
+const CAPACITY_STATUSES = ["unknown", "available", "on-job", "unavailable"];
+const CAPACITY_DEFAULT = "unknown";
+const CAPACITY_LABELS = { unknown: "Unknown", available: "Available", "on-job": "On Our Job", unavailable: "Unavailable" };
+const CAPACITY_COLORS = { unknown: "#475569", available: "#22c55e", "on-job": "#C8972A", unavailable: "#6b7280" };
+const CAPACITY_LETTERS = { unknown: "?", available: "A", "on-job": "J", unavailable: "X" };
 
 // Count status-days across a set of leads x days. Returns person-day tallies plus
-// derived capacity/utilization. Capacity available to us = available + on-job;
-// utilization = share of that capacity actually on our jobs.
+// derived capacity/utilization. Capacity available to us = available + on-job
+// (unknown and unavailable are excluded); utilization = share of that capacity on our jobs.
 function capacityStats(leads, days, crewCapacity) {
-  const counts = { available: 0, "on-job": 0, unavailable: 0 };
+  const counts = { unknown: 0, available: 0, "on-job": 0, unavailable: 0 };
   leads.forEach(lead => days.forEach(d => {
-    const s = crewCapacity[`${lead}|${d}`] || "available";
+    const s = crewCapacity[`${lead}|${d}`] || CAPACITY_DEFAULT;
     counts[s] = (counts[s] || 0) + 1;
   }));
   const capacity = counts.available + counts["on-job"];
@@ -721,7 +755,7 @@ const editLabelStyle = {
   marginBottom: "3px",
 };
 
-function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAddCustomPaint }) {
+function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAddCustomPaint, callbacks }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -898,16 +932,18 @@ function HistoryRow({ job, onDelete, onUpdate, paintCatalog, teamLeadList, onAdd
 
           {/* Low-GP diagnosis (job-costing decision tree) */}
           {(() => {
-            const findings = diagnoseJob(job);
-            if (findings.length === 0) return null;
+            const { level, findings } = diagnoseJob(job, target, paintCatalog, callbacks);
+            if (!level || findings.length === 0) return null;
+            const isFloor = level === "floor";
+            const accent = isFloor ? COLORS.red : COLORS.yellow;
             return (
               <div style={{
                 marginBottom: "12px", padding: "12px 14px",
-                background: "rgba(239,68,68,0.07)", borderRadius: "8px",
-                border: `1px solid ${COLORS.red}33`,
+                background: `${accent}12`, borderRadius: "8px",
+                border: `1px solid ${accent}33`,
               }}>
-                <div style={{ fontSize: "10px", color: COLORS.red, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px", fontWeight: 700 }}>
-                  GP below 40% floor — likely causes
+                <div style={{ fontSize: "10px", color: accent, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px", fontWeight: 700 }}>
+                  {isFloor ? "GP below 40% floor — likely causes" : `GP below your ${fmtPct(target)} target — watch`}
                 </div>
                 {findings.map((f, i) => (
                   <div key={i} style={{ marginBottom: i < findings.length - 1 ? "10px" : 0 }}>
@@ -1424,6 +1460,19 @@ export default function App() {
   function updateCallbacks(next) {
     setCallbacks(next);
     saveCallbacks(next);
+  }
+
+  // Add a team lead to the shared roster (used on the Crew tab). Keeps "N/A" last.
+  // Reuses the existing newLeadName state declared above.
+  function addTeamLead() {
+    const name = newLeadName.trim();
+    if (!name) return;
+    if (teamLeadList.some(l => l.toLowerCase() === name.toLowerCase())) { setNewLeadName(""); return; }
+    const withoutNA = teamLeadList.filter(l => l !== "N/A");
+    const updated = teamLeadList.includes("N/A") ? [...withoutNA, name, "N/A"] : [...withoutNA, name];
+    setTeamLeadList(updated);
+    saveTeamLeads(updated);
+    setNewLeadName("");
   }
 
   // ─── CALCULATIONS ──────────────────────────────────────────────────────────
@@ -2432,7 +2481,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
 
           function toggleStatus(lead, dateStr) {
             const key = `${lead}|${dateStr}`;
-            const current = crewCapacity[key] || "available";
+            const current = crewCapacity[key] || CAPACITY_DEFAULT;
             const nextIdx = (CAPACITY_STATUSES.indexOf(current) + 1) % CAPACITY_STATUSES.length;
             const updated = { ...crewCapacity, [key]: CAPACITY_STATUSES[nextIdx] };
             setCrewCapacity(updated);
@@ -2493,6 +2542,22 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                   })()}
                 </div>
 
+                {/* Add a team lead to the board */}
+                <div style={{ display: "flex", gap: "8px", marginBottom: "18px", alignItems: "center" }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1, maxWidth: "280px", fontSize: "13px" }}
+                    value={newLeadName}
+                    onChange={e => setNewLeadName(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") addTeamLead(); }}
+                    placeholder="New team lead name"
+                  />
+                  <button onClick={addTeamLead} style={{
+                    fontSize: "12px", fontWeight: 600, color: COLORS.charcoal,
+                    background: `linear-gradient(135deg, ${COLORS.gold}, ${COLORS.orange})`,
+                    border: "none", borderRadius: "6px", padding: "9px 16px", cursor: "pointer", whiteSpace: "nowrap",
+                  }}>+ Add team lead</button>
+                </div>
+
                 {weeks.map(week => {
                   const stats = capacityStats(leads, week.days, crewCapacity);
                   const utilColor = stats.utilPct >= 0.7 ? COLORS.green : stats.utilPct >= 0.4 ? COLORS.yellow : COLORS.red;
@@ -2550,7 +2615,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                             {lead.split(" (")[0]}
                           </div>
                           {week.days.map(d => {
-                            const status = crewCapacity[`${lead}|${d}`] || "available";
+                            const status = crewCapacity[`${lead}|${d}`] || CAPACITY_DEFAULT;
                             const isPast = d < today;
                             return (
                               <button
@@ -2571,7 +2636,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                                   opacity: isPast ? 0.6 : 1,
                                 }}
                               >
-                                {status === "available" ? "A" : status === "on-job" ? "J" : "X"}
+                                {CAPACITY_LETTERS[status] || "?"}
                               </button>
                             );
                           })}
@@ -2600,6 +2665,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
                           <div><span style={{ color: COLORS.gold, fontWeight: 600 }}>{stats["on-job"]}</span> on our jobs</div>
                           <div><span style={{ color: COLORS.green, fontWeight: 600 }}>{stats.available}</span> open capacity</div>
                           <div><span style={{ color: COLORS.muted, fontWeight: 600 }}>{stats.unavailable}</span> unavailable</div>
+                          {stats.unknown > 0 && <div><span style={{ color: "#64748b", fontWeight: 600 }}>{stats.unknown}</span> unknown</div>}
                         </div>
                       </div>
                     );
@@ -2998,7 +3064,7 @@ GP Estimate: ${fmt$(gpDollar)} (${fmtPct(gpPct)}) | Target: ${fmtPct(gpTarget)}`
             )}
 
             {filteredHistory.map(job => (
-              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={fullPaintCatalog} teamLeadList={teamLeadList} onAddCustomPaint={addCustomPaint} />
+              <HistoryRow key={job.id} job={job} onDelete={handleDelete} onUpdate={handleUpdateJob} paintCatalog={fullPaintCatalog} teamLeadList={teamLeadList} onAddCustomPaint={addCustomPaint} callbacks={callbacks} />
             ))}
           </>
           );
