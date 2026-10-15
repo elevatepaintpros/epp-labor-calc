@@ -453,7 +453,7 @@ function computeCommissions(jobs, settings) {
 const CAPACITY_STATUSES = ["unknown", "available", "on-job", "unavailable"];
 const CAPACITY_DEFAULT = "unknown";
 const CAPACITY_LABELS = { unknown: "Unknown", available: "Available", "on-job": "On Our Job", unavailable: "Unavailable" };
-const CAPACITY_COLORS = { unknown: "#475569", available: "#22c55e", "on-job": "#C8972A", unavailable: "#6b7280" };
+const CAPACITY_COLORS = { unknown: "#475569", available: "#22c55e", "on-job": "#C8972A", unavailable: "#ef4444" };
 const CAPACITY_LETTERS = { unknown: "?", available: "A", "on-job": "J", unavailable: "X" };
 
 // Average revenue produced per crew per on-the-job day, used only for the rough
